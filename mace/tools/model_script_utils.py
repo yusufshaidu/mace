@@ -83,6 +83,7 @@ def configure_model(
         "ScaleShiftMACE",
         "MACELES",
         "PolarMACE",
+        "MACEPQEQ",
     ]:
         logging.info("Loading FOUNDATION model")
         model_config_foundation = extract_config_mace_model(model_foundation)
@@ -123,6 +124,8 @@ def configure_model(
             args.model = "FoundationMACELES"
         elif args.model in ("MACE", "ScaleShiftMACE"):
             args.model = "FoundationMACE"
+        elif args.model == "MACEPQEQ":
+            args.model = "FoundationMACEPQEQ"
         model_config_foundation["heads"] = heads
         model_config = model_config_foundation
 
@@ -334,6 +337,15 @@ def _build_model(
             les_arguments=args.les_arguments,
             **model_config_foundation,
         )
+    if args.model == "FoundationMACEPQEQ":
+        from mace.modules.extensions import MACEPQEQ
+
+        return MACEPQEQ(
+            accuracy=args.accuracy,
+            n_shells=args.n_shells,
+            pqeq = args.pqeq,
+            **model_config_foundation,
+        )
     if args.model == "ScaleShiftBOTNet":
         # say it is deprecated
         raise RuntimeError("ScaleShiftBOTNet is deprecated, use MACE instead")
@@ -396,6 +408,31 @@ def _build_model(
 
         return MACELES(
             les_arguments=args.les_arguments,
+            **model_config,
+            pair_repulsion=args.pair_repulsion,
+            distance_transform=args.distance_transform,
+            correlation=args.correlation,
+            gate=modules.gate_dict[args.gate],
+            interaction_cls_first=modules.interaction_classes[args.interaction_first],
+            MLP_irreps=o3.Irreps(args.MLP_irreps),
+            atomic_inter_scale=args.std,
+            atomic_inter_shift=[0.0] * len(heads),
+            radial_MLP=ast.literal_eval(args.radial_MLP),
+            radial_type=args.radial_type,
+            heads=heads,
+            embedding_specs=args.embedding_specs,
+            use_embedding_readout=args.use_embedding_readout,
+            use_last_readout_only=args.use_last_readout_only,
+            use_agnostic_product=args.use_agnostic_product,
+        )
+    if args.model == "MACEPQEQ":
+        from mace.modules.extensions import MACEPQEQ
+
+        return MACEPQEQ(
+            accuracy=args.accuracy,
+            n_shells=args.n_shells,
+            pqeq=args.pqeq,
+            pqeq_arguments=args.pqeq_arguments,
             **model_config,
             pair_repulsion=args.pair_repulsion,
             distance_transform=args.distance_transform,

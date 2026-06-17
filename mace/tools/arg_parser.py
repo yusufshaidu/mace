@@ -140,6 +140,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "ScaleShiftMACE",
             "PolarMACE",
             "MACELES",
+            "MACEPQEQ",
             "ScaleShiftBOTNet",
             "AtomicDipolesMACE",
             "AtomicDielectricMACE",
@@ -1268,6 +1269,27 @@ def build_preprocess_arg_parser() -> argparse.ArgumentParser:
         help="Dict of heads: containing individual files and E0s",
         type=str,
         default=None,
+        required=False,
+    )
+    # add PQEQ relevant args
+    parser.add_argument(
+        "--pqeq",
+        help="Whether to use MACEOEQ or not",
+        action="store_true",
+        required=False,
+    )
+    parser.add_argument(
+        "--accuracy",
+        help="Accuracy of the MACEOEQ charge equilibration",
+        type=float,
+        default=1e-4,
+        required=False,
+    )
+    parser.add_argument(
+        "--n_shells",
+        help="Number of shells for the MACEOEQ charge equilibration",
+        type=int,
+        default=1,
         required=False,
     )
     return parser

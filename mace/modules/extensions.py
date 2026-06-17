@@ -76,14 +76,18 @@ def _get_readout_input_dim(block: torch.nn.Module) -> int:
 
 @compile_mode("script")
 class MACEPQEQ(ScaleShiftMACE):
-    def __init__(self, pqeq_arguments: Optional[Dict] = None, **kwargs):
+    def __init__(self, accuracy = 1e-4, n_shells = 1, pqeq = True, pqeq_arguments: Optional[Dict] = None, **kwargs):
         super().__init__(**kwargs)
         if pqeq_arguments is None:
-            pqeq_arguments = {"use_atomwise": False}
-        self.compute_bec = pqeq_arguments.get("compute_bec", False)
-        self.bec_output_index = pqeq_arguments.get("bec_output_index", None)
+            pqeq_arguments = {}
 
-        self.pqeq = bacenet.something(pqeq_arguments=pqeq_arguments) ## CHANGE THE SOMETHING
+        self.accuracy = accuracy
+        self.n_shells = n_shells
+        self.pqeq = pqeq
+
+        from bacenet.models.pqeq import BACENET
+        self.pqeq_model = BACENET(accuracy=self.accuracy, n_shells=self.n_shells, pqeq=self.pqeq, configs=None)
+
         self.pqeq_e1_readouts = torch.nn.ModuleList()
         self.pqeq_e2_readouts = torch.nn.ModuleList()
         self.pqeq_e2d_readouts = torch.nn.ModuleList()
@@ -252,11 +256,25 @@ class MACEPQEQ(ScaleShiftMACE):
 
         total_energy = e0 + inter_e
         node_energy = node_e0.clone().double() + node_inter_es.clone().double()
-        pqeq_e1 = torch.sum(torch.stack(node_e1s_list, dim=1), dim=1)
-        pqeq_e2 = torch.sum(torch.stack(node_e2s_list, dim=1), dim=1)
-        pqeq_e2d = torch.sum(torch.stack(node_e2ds_list, dim=1), dim=1)
+        e1_pqeq = torch.sum(torch.stack(node_e1s_list, dim=1), dim=1)
+        e2_pqeq = torch.sum(torch.stack(node_e2s_list, dim=1), dim=1)
+        e2d_pqeq = torch.sum(torch.stack(node_e2ds_list, dim=1), dim=1)
 
-        from bacenet.models.model_run_torch import BACENET
+
+        pqeq_data = {
+            "positions":      positions,
+            "cells":          cell_pqeq,
+            "E1":             e1_pqeq,
+            "E2":             e2_pqeq,
+            "E_d2":           e2d_pqeq,
+            "batch":          data["batch"],
+            "atomic_number":  self.atomic_numbers[data["node_attrs"].argmax(dim=-1)],
+            "total_charge":   data["total_charge"],
+            "external_field": data.get("external_field", torch.zeros(len(data["total_charge"]), 3, device=positions.device, dtype=positions.dtype)),
+        }
+
+        pqeq_result = self.pqeq_model(pqeq_data)
+
 
         """
         # Fix batch handling by using a function to package these; vmap
@@ -316,10 +334,15 @@ class MACEPQEQ(ScaleShiftMACE):
         else:
             les_energy = les_energy_opt
         """
-        total_energy += pqeq_energy
+
+        # sum over E1*charges + 0.5*E2*charges^2 + 0.5*E2d*disp*disp
+        energy_pqeq_local = pqeq_result['energy_pqeq_local']
+        energy_pqeq_ewald_field = pqeq_result['energy']
+        energy_pqeq = energy_pqeq_local + energy_pqeq_ewald_field
+        total_energy += energy_pqeq
 
         forces, virials, stress, hessian, edge_forces = get_outputs(
-            energy=inter_e + pqeq_energy,
+            energy=inter_e + energy_pqeq_local, # using this we can obtian 
             positions=positions,
             displacement=displacement,
             vectors=vectors,
@@ -344,21 +367,22 @@ class MACEPQEQ(ScaleShiftMACE):
                 batch=data["batch"],
                 cell=cell,
             )
+
         return {
             "energy": total_energy,
             "node_energy": node_energy,
-            "forces": forces,
+            "forces": forces + pqeq_result['forces'] ,
             "edge_forces": edge_forces,
             "virials": virials,
-            "stress": stress,
+            "stress": stress + pqeq_result['stress'],
             "atomic_virials": atomic_virials,
             "atomic_stresses": atomic_stresses,
             "displacement": displacement,
             "hessian": hessian,
             "node_feats": node_feats_out,
-            "pqeq_energy": pqeq_energy,
-            "charges": pqeq_charges,
-            "dipoles": pqeq_dipoles,
+            "energy_pqeq": energy_pqeq,
+            "charges": pqeq_result['charges'],
+            "dipoles": pqeq_result['Pi_a'],
             #"BEC": les_result["BEC"],
         }
 
