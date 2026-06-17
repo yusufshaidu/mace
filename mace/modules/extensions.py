@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 import torch
 from e3nn import o3
 from e3nn.util.jit import compile_mode
+from bacenet.models.ewald_torch import ewald
 
 try:
     from graph_longrange.energy import GTOElectrostaticEnergy
@@ -75,20 +76,29 @@ def _get_readout_input_dim(block: torch.nn.Module) -> int:
 
 @compile_mode("script")
 class MACEPQEQ(ScaleShiftMACE):
-    def __init__(self, les_arguments: Optional[Dict] = None, **kwargs):
+    def __init__(self, pqeq_arguments: Optional[Dict] = None, **kwargs):
         super().__init__(**kwargs)
-        if les_arguments is None:
-            les_arguments = {"use_atomwise": False}
-        self.compute_bec = les_arguments.get("compute_bec", False)
-        self.bec_output_index = les_arguments.get("bec_output_index", None)
-        self.les = Les(les_arguments=les_arguments)
-        self.les_readouts = torch.nn.ModuleList()
+        if pqeq_arguments is None:
+            pqeq_arguments = {"use_atomwise": False}
+        self.compute_bec = pqeq_arguments.get("compute_bec", False)
+        self.bec_output_index = pqeq_arguments.get("bec_output_index", None)
+
+        self.pqeq = bacenet.something(pqeq_arguments=pqeq_arguments) ## CHANGE THE SOMETHING
+        self.pqeq_e1_readouts = torch.nn.ModuleList()
+        self.pqeq_e2_readouts = torch.nn.ModuleList()
+        self.pqeq_e2d_readouts = torch.nn.ModuleList()
         self.readout_input_dims = [
             _get_readout_input_dim(readout) for readout in self.readouts  # type: ignore
         ]
         cueq_config = kwargs.get("cueq_config", None)
         for readout in self.readouts:  # type: ignore
-            self.les_readouts.append(
+            self.pqeq_e1_readouts.append(
+                _copy_mace_readout(readout, cueq_config=cueq_config)
+            )
+            self.pqeq_e2_readouts.append(
+                _copy_mace_readout(readout, cueq_config=cueq_config)
+            )
+            self.pqeq_e2d_readouts.append(
                 _copy_mace_readout(readout, cueq_config=cueq_config)
             )
 
@@ -126,13 +136,13 @@ class MACEPQEQ(ScaleShiftMACE):
         lammps_natoms = interaction_kwargs.lammps_natoms
         lammps_class = interaction_kwargs.lammps_class
 
-        # Setting LES cell input to zero when boundary conditions are not periodic
-        cell_les = cell.clone()
+        # Setting PQEQ cell input to zero when boundary conditions are not periodic
+        cell_pqeq = cell.clone()
         pbc_tensor = data["pbc"].to(device=data["cell"].device)
         no_pbc_mask_cfg = ~pbc_tensor.any(dim=-1)
         no_pbc_mask_rows = no_pbc_mask_cfg.repeat_interleave(3)
-        cell_les[no_pbc_mask_rows] = torch.zeros(
-            (no_pbc_mask_rows.sum(), 3), dtype=cell_les.dtype, device=cell_les.device
+        cell_pqeq[no_pbc_mask_rows] = torch.zeros(
+            (no_pbc_mask_rows.sum(), 3), dtype=cell_pqeq.dtype, device=cell_pqeq.device
         )
 
         # Atomic energies
@@ -185,7 +195,9 @@ class MACEPQEQ(ScaleShiftMACE):
         # Interactions
         node_es_list = [pair_node_energy]
         node_feats_list: List[torch.Tensor] = []
-        node_qs_list: List[torch.Tensor] = []
+        node_e1s_list: List[torch.Tensor] = []
+        node_e2s_list: List[torch.Tensor] = []
+        node_e2ds_list: List[torch.Tensor] = []
 
         for i, (interaction, product) in enumerate(
             zip(self.interactions, self.products)
@@ -211,18 +223,27 @@ class MACEPQEQ(ScaleShiftMACE):
             )
             node_feats_list.append(node_feats)
 
-        for i, (readout, les_readout) in enumerate(
-            zip(self.readouts, self.les_readouts)
+        for i, (readout, pqeq_e1_readout, pqeq_e2_readout, pqeq_e2d_readout) in enumerate(
+            zip(self.readouts, self.pqeq_e1_readouts, self.pqeq_e2_readouts, self.pqeq_e2d_readouts)
         ):
             feat_idx = -1 if len(self.readouts) == 1 else i
             node_es = readout(node_feats_list[feat_idx], node_heads)[
                 num_atoms_arange, node_heads
             ]
-            node_qs = les_readout(node_feats_list[feat_idx], node_heads)[
+            node_e1s = pqeq_e1_readout(node_feats_list[feat_idx], node_heads)[
                 num_atoms_arange, node_heads
-            ]  # type: ignore
-            node_qs_list.append(node_qs)
+            ]  
+            node_e2s = pqeq_e2_readout(node_feats_list[feat_idx], node_heads)[
+                num_atoms_arange, node_heads
+            ]  
+            node_e2ds = pqeq_e2d_readout(node_feats_list[feat_idx], node_heads)[
+                num_atoms_arange, node_heads
+            ]  
+            
             node_es_list.append(node_es)
+            node_e1s_list.append(node_e1s)
+            node_e2s_list.append(node_e2s)
+            node_e2ds_list.append(node_e2ds)
 
         node_feats_out = torch.cat(node_feats_list, dim=-1)
         node_inter_es = torch.sum(torch.stack(node_es_list, dim=0), dim=0)
@@ -231,26 +252,74 @@ class MACEPQEQ(ScaleShiftMACE):
 
         total_energy = e0 + inter_e
         node_energy = node_e0.clone().double() + node_inter_es.clone().double()
+        pqeq_e1 = torch.sum(torch.stack(node_e1s_list, dim=1), dim=1)
+        pqeq_e2 = torch.sum(torch.stack(node_e2s_list, dim=1), dim=1)
+        pqeq_e2d = torch.sum(torch.stack(node_e2ds_list, dim=1), dim=1)
 
-        les_q = torch.sum(torch.stack(node_qs_list, dim=1), dim=1)
+        from bacenet.models.model_run_torch import BACENET
+
+        """
+        # Fix batch handling by using a function to package these; vmap
+        # charge equilibration 
+        # things like pqeq_charges and pqeq_dipoles will be obtained here
+        
+
+        # put in chi0, J0, nat, total charge, gaussian_width, and atomic_q0
+        # some of this can be found in mendeleev
+        E1 = E1 + chi0
+        E2 = E2 + J0
+
+        _b = E1 - E2 * atomic_q0
+
+        _efield = self.efield.to(positions.device).detach().requires_grad_(True)
+        # External field coupling
+        if self.apply_field:
+            field_kernel_q = -(positions * _efield.unsqueeze(0)).sum(dim=-1)
+            # Field drives shell displacement: V_ia . E (one copy per shell)
+            field_kernel_e = 2.0 * _efield.unsqueeze(0).unsqueeze(0).expand(
+                nat, self._n_shells, 3).reshape(nat, self._n_shells * 3)
+            field_kernel_qe = torch.zeros(nat, self._n_shells * 3)
+        else:
+            field_kernel_q = torch.zeros(nat)
+            field_kernel_e = torch.zeros(nat, self._n_shells * 3)
+            field_kernel_qe = torch.zeros(nat, self._n_shells * 3)
+        _b = _b + field_kernel_q
+
+        _ewald = ewald(positions, cell, nat, gaussian_width,
+                       self.accuracy, None, self.pbc, _efield)
+        Vij, Vija, Vijab = _ewald.recip_space_term_with_shelld_quadratic_qd_n()
+
+        from bacenet.models.coulomb_functions_torch import _compute_charges_disp_n
+
+        charges, shell_disp = _compute_charges_disp_n(Vij, Vija,Vijab,
+                _b, pqeq_e2, pqeq_e2d, field_kernel_e,
+                atomic_q0, total_charge)
+         """
+        # compute energy contributions from e1, e2, and e2d, coulomb related stuff
+
+        """
         les_result = self.les(
             latent_charges=les_q,
             positions=positions,
-            cell=cell_les.view(-1, 3, 3),
+            cell=cell_pqeq.view(-1, 3, 3),
             batch=data["batch"],
             compute_energy=True,
             compute_bec=(compute_bec or self.compute_bec),
             bec_output_index=self.bec_output_index,
         )
         les_energy_opt = les_result["E_lr"]
-        if les_energy_opt is None:
+        """
+        #Something relevant for batch handling
+        """
+        if les_energy_opt is None: 
             les_energy = torch.zeros_like(total_energy)
         else:
             les_energy = les_energy_opt
-        total_energy += les_energy
+        """
+        total_energy += pqeq_energy
 
         forces, virials, stress, hessian, edge_forces = get_outputs(
-            energy=inter_e + les_energy,
+            energy=inter_e + pqeq_energy,
             positions=positions,
             displacement=displacement,
             vectors=vectors,
@@ -263,6 +332,7 @@ class MACEPQEQ(ScaleShiftMACE):
             compute_edge_forces=compute_edge_forces,
         )
 
+        # Add Coulomb term to forces and stress 
         atomic_virials: Optional[torch.Tensor] = None
         atomic_stresses: Optional[torch.Tensor] = None
         if compute_atomic_stresses and edge_forces is not None:
@@ -286,9 +356,10 @@ class MACEPQEQ(ScaleShiftMACE):
             "displacement": displacement,
             "hessian": hessian,
             "node_feats": node_feats_out,
-            "les_energy": les_energy,
-            "latent_charges": les_q,
-            "BEC": les_result["BEC"],
+            "pqeq_energy": pqeq_energy,
+            "charges": pqeq_charges,
+            "dipoles": pqeq_dipoles,
+            #"BEC": les_result["BEC"],
         }
 
 @compile_mode("script")
