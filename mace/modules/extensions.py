@@ -112,7 +112,7 @@ class MACEPQEQ(ScaleShiftMACE):
         training: bool = False,
         compute_force: bool = True,
         compute_virials: bool = False,
-        compute_stress: bool = False,
+        compute_stress: bool = True, #False
         compute_displacement: bool = False,
         compute_hessian: bool = False,
         compute_edge_forces: bool = False,
@@ -367,7 +367,7 @@ class MACEPQEQ(ScaleShiftMACE):
                 batch=data["batch"],
                 cell=cell,
             )
-
+        print("macestress: ", stress)
         return {
             "energy": total_energy,
             "node_energy": node_energy,
@@ -375,6 +375,7 @@ class MACEPQEQ(ScaleShiftMACE):
             "edge_forces": edge_forces,
             "virials": virials,
             "stress": stress + pqeq_result['stress'],
+            #"stress": stress,
             "atomic_virials": atomic_virials,
             "atomic_stresses": atomic_stresses,
             "displacement": displacement,

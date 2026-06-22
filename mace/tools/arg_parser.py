@@ -1094,6 +1094,34 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "forces_weight",
         ],
     )
+    # add PQEQ relevant args
+    parser.add_argument(
+        "--pqeq",
+        help="Whether to use MACEOEQ or not",
+        action="store_true",
+        required=False,
+    )
+    parser.add_argument(
+        "--accuracy",
+        help="Accuracy of the MACEOEQ charge equilibration",
+        type=float,
+        default=1e-4,
+        required=False,
+    )
+    parser.add_argument(
+        "--n_shells",
+        help="Number of shells for the MACEOEQ charge equilibration",
+        type=int,
+        default=1,
+        required=False,
+    )
+    parser.add_argument(
+        "--pqeq_arguments",
+        help="Path to the PQEQ arguments file",
+        type=read_yaml,
+        default=None,
+        required=False,
+    )
     return parser
 
 
