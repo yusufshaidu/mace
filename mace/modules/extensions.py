@@ -264,9 +264,11 @@ class MACEPQEQ(ScaleShiftMACE):
         pqeq_data = {
             "positions":      positions,
             "cells":          cell_pqeq,
+            #"E1":             torch.nn.Softplus()(e1_pqeq),
             "E1":             e1_pqeq,
+            #"E2":             torch.nn.Softplus()(e2_pqeq),
             "E2":             e2_pqeq,
-            "E_d2":           e2d_pqeq,
+            "E_d2":           torch.nn.Softplus()(e2d_pqeq),
             "batch":          data["batch"],
             "atomic_number":  self.atomic_numbers[data["node_attrs"].argmax(dim=-1)],
             "total_charge":   data["total_charge"],
@@ -274,66 +276,6 @@ class MACEPQEQ(ScaleShiftMACE):
         }
 
         pqeq_result = self.pqeq_model(pqeq_data)
-
-
-        """
-        # Fix batch handling by using a function to package these; vmap
-        # charge equilibration 
-        # things like pqeq_charges and pqeq_dipoles will be obtained here
-        
-
-        # put in chi0, J0, nat, total charge, gaussian_width, and atomic_q0
-        # some of this can be found in mendeleev
-        E1 = E1 + chi0
-        E2 = E2 + J0
-
-        _b = E1 - E2 * atomic_q0
-
-        _efield = self.efield.to(positions.device).detach().requires_grad_(True)
-        # External field coupling
-        if self.apply_field:
-            field_kernel_q = -(positions * _efield.unsqueeze(0)).sum(dim=-1)
-            # Field drives shell displacement: V_ia . E (one copy per shell)
-            field_kernel_e = 2.0 * _efield.unsqueeze(0).unsqueeze(0).expand(
-                nat, self._n_shells, 3).reshape(nat, self._n_shells * 3)
-            field_kernel_qe = torch.zeros(nat, self._n_shells * 3)
-        else:
-            field_kernel_q = torch.zeros(nat)
-            field_kernel_e = torch.zeros(nat, self._n_shells * 3)
-            field_kernel_qe = torch.zeros(nat, self._n_shells * 3)
-        _b = _b + field_kernel_q
-
-        _ewald = ewald(positions, cell, nat, gaussian_width,
-                       self.accuracy, None, self.pbc, _efield)
-        Vij, Vija, Vijab = _ewald.recip_space_term_with_shelld_quadratic_qd_n()
-
-        from bacenet.models.coulomb_functions_torch import _compute_charges_disp_n
-
-        charges, shell_disp = _compute_charges_disp_n(Vij, Vija,Vijab,
-                _b, pqeq_e2, pqeq_e2d, field_kernel_e,
-                atomic_q0, total_charge)
-         """
-        # compute energy contributions from e1, e2, and e2d, coulomb related stuff
-
-        """
-        les_result = self.les(
-            latent_charges=les_q,
-            positions=positions,
-            cell=cell_pqeq.view(-1, 3, 3),
-            batch=data["batch"],
-            compute_energy=True,
-            compute_bec=(compute_bec or self.compute_bec),
-            bec_output_index=self.bec_output_index,
-        )
-        les_energy_opt = les_result["E_lr"]
-        """
-        #Something relevant for batch handling
-        """
-        if les_energy_opt is None: 
-            les_energy = torch.zeros_like(total_energy)
-        else:
-            les_energy = les_energy_opt
-        """
 
         # sum over E1*charges + 0.5*E2*charges^2 + 0.5*E2d*disp*disp
         energy_pqeq_local = pqeq_result['energy_pqeq_local']
@@ -367,7 +309,8 @@ class MACEPQEQ(ScaleShiftMACE):
                 batch=data["batch"],
                 cell=cell,
             )
-        print("macestress: ", stress)
+        #print("maceforces: ", forces)
+        #print("macestress: ", stress)
         return {
             "energy": total_energy,
             "node_energy": node_energy,
