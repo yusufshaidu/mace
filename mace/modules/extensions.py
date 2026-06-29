@@ -286,7 +286,7 @@ class MACEPQEQ(ScaleShiftMACE):
         energy_pqeq = energy_pqeq_local + energy_pqeq_ewald_field
         total_energy += energy_pqeq
 
-        if pqeq_result['forces'] is None:
+        if torch.isnan(pqeq_result['forces']).any():
             _total_energy = inter_e + energy_pqeq
         else:
             _total_energy = inter_e + energy_pqeq_local
@@ -305,7 +305,7 @@ class MACEPQEQ(ScaleShiftMACE):
             compute_hessian=compute_hessian,
             compute_edge_forces=compute_edge_forces,
         )
-        if pqeq_result['forces'] is not None:
+        if not torch.isnan(pqeq_result['forces']).any():
             forces += pqeq_result['forces']
             stress += pqeq_result['stress']
 
