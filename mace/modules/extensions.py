@@ -272,7 +272,10 @@ class MACEPQEQ(ScaleShiftMACE):
             "batch":          data["batch"],
             "atomic_number":  self.atomic_numbers[data["node_attrs"].argmax(dim=-1)],
             "total_charge":   data["total_charge"],
-            "external_field": data.get("external_field", torch.zeros(len(data["total_charge"]), 3, device=positions.device, dtype=positions.dtype)),
+            "external_field": data.get("external_field", 
+                                       torch.zeros(len(data["total_charge"]), 3, 
+                                                   device=positions.device, 
+                                                   dtype=positions.dtype)),
         }
 
         pqeq_result = self.pqeq_model(pqeq_data)
@@ -283,8 +286,14 @@ class MACEPQEQ(ScaleShiftMACE):
         energy_pqeq = energy_pqeq_local + energy_pqeq_ewald_field
         total_energy += energy_pqeq
 
+        if pqeq_result['forces'] is None:
+            _total_energy = inter_e + energy_pqeq
+        else:
+            _total_energy = inter_e + energy_pqeq_local
+
+
         forces, virials, stress, hessian, edge_forces = get_outputs(
-            energy=inter_e + energy_pqeq_local, # using this we can obtian 
+            energy=_total_energy, # using this we can obtian 
             positions=positions,
             displacement=displacement,
             vectors=vectors,
@@ -296,6 +305,9 @@ class MACEPQEQ(ScaleShiftMACE):
             compute_hessian=compute_hessian,
             compute_edge_forces=compute_edge_forces,
         )
+        if pqeq_result['forces'] is not None:
+            forces += pqeq_result['forces']
+            stress += pqeq_result['stress']
 
         # Add Coulomb term to forces and stress 
         atomic_virials: Optional[torch.Tensor] = None
@@ -314,10 +326,10 @@ class MACEPQEQ(ScaleShiftMACE):
         return {
             "energy": total_energy,
             "node_energy": node_energy,
-            "forces": forces + pqeq_result['forces'] ,
+            "forces": forces,
             "edge_forces": edge_forces,
             "virials": virials,
-            "stress": stress + pqeq_result['stress'],
+            "stress": stress,
             #"stress": stress,
             "atomic_virials": atomic_virials,
             "atomic_stresses": atomic_stresses,
