@@ -155,13 +155,14 @@ class MACECalculator(Calculator):
             "EnergyDipoleMACE",
             "DipolePolarizabilityMACE",
             "PolarMACE",
+            "MACEPQEQ",
         ]:
             raise ValueError(
-                f"Give a valid model_type: [MACE, PolarMACE, DipoleMACE, DipolePolarizabilityMACE, EnergyDipoleMACE], {model_type} not supported"
+                f"Give a valid model_type: [MACE, PolarMACE, DipoleMACE, DipolePolarizabilityMACE, EnergyDipoleMACE, MACEPQEQ], {model_type} not supported"
             )
 
         # superclass constructor initializes self.implemented_properties to an empty list
-        if model_type in ["MACE", "EnergyDipoleMACE", "PolarMACE"]:
+        if model_type in ["MACE", "EnergyDipoleMACE", "PolarMACE","MACEPQEQ"]:
             self.implemented_properties.extend(
                 [
                     "energy",
@@ -175,9 +176,9 @@ class MACECalculator(Calculator):
             if kwargs.get("compute_atomic_stresses", False):
                 self.implemented_properties.extend(["stresses", "virials"])
                 self.compute_atomic_stresses = True
-        if model_type in ["EnergyDipoleMACE", "DipoleMACE", "DipolePolarizabilityMACE"]:
+        if model_type in ["EnergyDipoleMACE", "DipoleMACE", "DipolePolarizabilityMACE","MACEPQEQ"]:
             self.implemented_properties.extend(["dipole"])
-        if model_type == "DipolePolarizabilityMACE":
+        if model_type == "DipolePolarizabilityMACE" or model_type == "MACEPQEQ":
             self.implemented_properties.extend(
                 [
                     "charges",
@@ -455,7 +456,7 @@ class MACECalculator(Calculator):
 
         batch_base = self._atoms_to_batch(atoms)
 
-        if self.model_type in ["MACE", "EnergyDipoleMACE", "PolarMACE"]:
+        if self.model_type in ["MACE", "EnergyDipoleMACE", "PolarMACE", "MACEPQEQ"]:
             compute_stress = not self.use_compile
         else:
             compute_stress = False
@@ -477,6 +478,8 @@ class MACECalculator(Calculator):
                 compute_edge_forces=self.compute_atomic_stresses,
                 compute_atomic_stresses=self.compute_atomic_stresses,
             )
+            print(f"out keys: {list(out.keys())}")
+            print(out["stress"])
             if i == 0:
                 ret_tensors, node_e0 = self._create_result_tensors(
                     self.num_models, len(atoms), batch, out
@@ -484,7 +487,7 @@ class MACECalculator(Calculator):
             for key, val in ret_tensors.items():
                 if out.get(key) is not None:
                     val[i] = out[key].detach()
-
+        
         # covert from ret_tensors to calculator results dict
         self.results = {}
         scalar_tensors = set(["energy"])

@@ -905,6 +905,18 @@ def get_params_options(
                 "weight_decay": 0.0,
             }
         )
+    if (
+        hasattr(model, "pqeq_model")
+        and model.pqeq_model is not None
+        and hasattr(model.pqeq_model, "gaussian_width_embedding")
+    ):
+        param_options["params"].append(
+            {
+                "name": "pqeq_gaussian_width",
+                "params": model.pqeq_model.gaussian_width_embedding.parameters(),
+                "weight_decay": 0.0,
+            }
+        )
     return param_options
 
 

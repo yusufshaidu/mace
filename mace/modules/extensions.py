@@ -338,7 +338,7 @@ class MACEPQEQ(ScaleShiftMACE):
             "node_feats": node_feats_out,
             "energy_pqeq": energy_pqeq,
             "charges": pqeq_result['charges'],
-            "dipoles": pqeq_result['Pi_a'],
+            "dipole": pqeq_result['Pi_a'],
             #"BEC": les_result["BEC"],
         }
 

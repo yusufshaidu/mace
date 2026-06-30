@@ -59,7 +59,7 @@ _mace_params = {
     "energy_weight": 1.0,
     "forces_weight": 10.0,
     "stress_weight": 1.0,
-    "model": "MACEPQEQ",
+    "model": "s",
     "hidden_irreps": "128x0e",
     "r_max": 3.5,
     "batch_size": 5,
@@ -145,6 +145,31 @@ def test_run_train(tmp_path, fitting_configs):
         Es.append(at.get_potential_energy())
 
     print("Es", Es)
+    ref_Es = [
+        0.004919160731848143,
+        0.5906680240792959,
+        0.47887544882572264,
+        0.4176002467254094,
+        0.5606673227439406,
+        0.40181714730443363,
+        0.3367534132795259,
+        0.27118917957971056,
+        0.47967529915910134,
+        0.32077479180773283,
+        1.2865402405977537,
+        0.3472478715875782,
+        0.427734507004752,
+        0.8092185237225293,
+        0.38348242384362774,
+        0.14448973657513398,
+        0.5650118900854595,
+        0.429029669763921,
+        0.4837945154901776,
+        0.2244894146891574,
+        0.3667896493444026,
+        0.23811703879534651,
+    ]
+    assert np.allclose(Es, ref_Es)
 
 
 @pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
