@@ -76,17 +76,22 @@ def _get_readout_input_dim(block: torch.nn.Module) -> int:
 
 @compile_mode("script")
 class MACEPQEQ(ScaleShiftMACE):
-    def __init__(self, accuracy = 1e-4, n_shells = 1, pqeq = True, pqeq_arguments: Optional[Dict] = None, **kwargs):
+    def __init__(self, pqeq = True, pqeq_arguments: Optional[Dict] = None, **kwargs):
         super().__init__(**kwargs)
         if pqeq_arguments is None:
             pqeq_arguments = {}
 
-        self.accuracy = accuracy
-        self.n_shells = n_shells
         self.pqeq = pqeq
+        self.accuracy = pqeq_arguments.get('accuracy', 1e-4)
+        self.n_shells = pqeq_arguments.get('n_shells', 1)
+        self.analytic_ewald_derivative = pqeq_arguments.get('analytic_ewald_derivative', True)
+        self.exact_solver = pqeq_arguments.get('exact_solver', True)
 
         from bacenet.models.pqeq import BACENET
-        self.pqeq_model = BACENET(accuracy=self.accuracy, n_shells=self.n_shells, pqeq=self.pqeq, configs=None)
+        self.pqeq_model = BACENET(accuracy=self.accuracy, n_shells=self.n_shells, pqeq=self.pqeq,
+                                   analytic_ewald_derivative=self.analytic_ewald_derivative,
+                                   exact_solver=self.exact_solver,
+                                   configs=None)
 
         self.pqeq_e1_readouts = torch.nn.ModuleList()
         self.pqeq_e2_readouts = torch.nn.ModuleList()
@@ -264,10 +269,10 @@ class MACEPQEQ(ScaleShiftMACE):
         pqeq_data = {
             "positions":      positions,
             "cells":          cell_pqeq,
-            #"E1":             torch.nn.Softplus()(e1_pqeq),
-            "E1":             e1_pqeq,
-            #"E2":             torch.nn.Softplus()(e2_pqeq),
-            "E2":             e2_pqeq,
+            "E1":             torch.nn.Softplus()(e1_pqeq),
+            #"E1":             e1_pqeq,
+            "E2":             torch.nn.Softplus()(e2_pqeq),
+            #"E2":             e2_pqeq,
             "E_d2":           torch.nn.Softplus()(e2d_pqeq),
             "batch":          data["batch"],
             "atomic_number":  self.atomic_numbers[data["node_attrs"].argmax(dim=-1)],

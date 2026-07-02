@@ -1117,8 +1117,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--pqeq_arguments",
-        help="Path to the PQEQ arguments file",
-        type=read_yaml,
+        help="Inline YAML dict or path to a YAML file with PQEQ arguments",
         default=None,
         required=False,
     )

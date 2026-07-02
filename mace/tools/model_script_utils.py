@@ -427,12 +427,30 @@ def _build_model(
         )
     if args.model == "MACEPQEQ":
         from mace.modules.extensions import MACEPQEQ
+        from mace.tools.arg_parser import read_yaml
 
+        _DEFAULT_PQEQ_ARGUMENTS = {
+            'accuracy': 1e-4,
+            'n_shells': 1,
+            'analytic_ewald_derivative': True,
+            'exact_solver': True,
+        }
+
+        pqeq_arguments = args.pqeq_arguments
+        if pqeq_arguments is None:
+            pqeq_arguments = _DEFAULT_PQEQ_ARGUMENTS.copy()
+            print("No pqeq_arguments provided, using default values:")
+        elif isinstance(pqeq_arguments, str):
+            try:
+                import ast
+                pqeq_arguments = ast.literal_eval(pqeq_arguments)
+            except (ValueError, SyntaxError):
+                pqeq_arguments = read_yaml(pqeq_arguments)
+            pqeq_arguments = {**_DEFAULT_PQEQ_ARGUMENTS, **pqeq_arguments}
+            print(f"pqeq_arguments: {pqeq_arguments}")
         return MACEPQEQ(
-            accuracy=args.accuracy,
-            n_shells=args.n_shells,
             pqeq=args.pqeq,
-            pqeq_arguments=args.pqeq_arguments,
+            pqeq_arguments=pqeq_arguments,
             **model_config,
             pair_repulsion=args.pair_repulsion,
             distance_transform=args.distance_transform,
