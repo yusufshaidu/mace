@@ -136,14 +136,28 @@ class MACEPQEQ(ScaleShiftMACE):
         num_atoms_arange = ctx.num_atoms_arange
         num_graphs = ctx.num_graphs
         displacement = ctx.displacement
-        positions = ctx.positions
         vectors = ctx.vectors
         lengths = ctx.lengths
-        cell = ctx.cell
         node_heads = ctx.node_heads
         interaction_kwargs = ctx.interaction_kwargs
         lammps_natoms = interaction_kwargs.lammps_natoms
         lammps_class = interaction_kwargs.lammps_class
+
+        if displacement is not None and not is_lammps:
+            # ctx.positions/ctx.cell are the pre-strain leaf tensors (captured
+            # before prepare_graph's internal strain trick is applied).
+            # data["positions"] is mutated in place to the strain-connected
+            # version, but the strained cell itself is only used locally inside
+            # get_symmetric_displacement (to build edge `shifts`) and then
+            # discarded -- so we rebuild it here the same way, to keep the
+            # PQEQ/Ewald energy connected to `displacement` for stress autograd.
+            positions = data["positions"]
+            cell_3x3 = ctx.cell.view(-1, 3, 3)
+            symmetric_displacement = 0.5 * (displacement + displacement.transpose(-1, -2))
+            cell = (cell_3x3 + torch.matmul(cell_3x3, symmetric_displacement)).reshape(-1, 3)
+        else:
+            positions = ctx.positions
+            cell = ctx.cell
 
         # Setting PQEQ cell input to zero when boundary conditions are not periodic
         cell_pqeq = cell.clone()
@@ -269,10 +283,10 @@ class MACEPQEQ(ScaleShiftMACE):
         pqeq_data = {
             "positions":      positions,
             "cells":          cell_pqeq,
-            "E1":             torch.nn.Softplus()(e1_pqeq),
-            #"E1":             e1_pqeq,
-            "E2":             torch.nn.Softplus()(e2_pqeq),
-            #"E2":             e2_pqeq,
+            #"E1":             torch.nn.Softplus()(e1_pqeq),
+            "E1":             e1_pqeq,
+            #"E2":             torch.nn.Softplus()(e2_pqeq),
+            "E2":             e2_pqeq,
             "E_d2":           torch.nn.Softplus()(e2d_pqeq),
             "batch":          data["batch"],
             "atomic_number":  self.atomic_numbers[data["node_attrs"].argmax(dim=-1)],
