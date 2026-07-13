@@ -442,7 +442,6 @@ def _build_model(
             print("No pqeq_arguments provided, using default values:")
         elif isinstance(pqeq_arguments, str):
             try:
-                import ast
                 pqeq_arguments = ast.literal_eval(pqeq_arguments)
             except (ValueError, SyntaxError):
                 pqeq_arguments = read_yaml(pqeq_arguments)

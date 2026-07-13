@@ -312,7 +312,7 @@ class MACEPQEQ(ScaleShiftMACE):
 
 
         forces, virials, stress, hessian, edge_forces = get_outputs(
-            energy=_total_energy, # using this we can obtian 
+            energy=_total_energy, # using this we can obtian
             positions=positions,
             displacement=displacement,
             vectors=vectors,
