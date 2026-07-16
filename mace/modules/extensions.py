@@ -87,11 +87,13 @@ class MACEPQEQ(ScaleShiftMACE):
         self.analytic_ewald_derivative = pqeq_arguments.get('analytic_ewald_derivative', True)
         self.exact_solver = pqeq_arguments.get('exact_solver', True)
 
-        from bacenet.models.pqeq import BACENET
+        from bacenet.models.pqeq import BACENET, default_config
+        bacenet_configs = default_config()
+        bacenet_configs.update(pqeq_arguments)
         self.pqeq_model = BACENET(accuracy=self.accuracy, n_shells=self.n_shells, pqeq=self.pqeq,
                                    analytic_ewald_derivative=self.analytic_ewald_derivative,
                                    exact_solver=self.exact_solver,
-                                   configs=None)
+                                   configs=bacenet_configs)
 
         self.pqeq_e1_readouts = torch.nn.ModuleList()
         self.pqeq_e2_readouts = torch.nn.ModuleList()
