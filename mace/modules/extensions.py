@@ -289,7 +289,7 @@ class MACEPQEQ(ScaleShiftMACE):
             "E1":             e1_pqeq,
             #"E2":             torch.nn.Softplus()(e2_pqeq),
             "E2":             e2_pqeq,
-            "E_d2":           torch.nn.Softplus()(e2d_pqeq),
+            "E_d2":           e2d_pqeq,
             "batch":          data["batch"],
             "atomic_number":  self.atomic_numbers[data["node_attrs"].argmax(dim=-1)],
             "total_charge":   data["total_charge"],
@@ -360,6 +360,10 @@ class MACEPQEQ(ScaleShiftMACE):
             "energy_pqeq": energy_pqeq,
             "charges": pqeq_result['charges'],
             "dipole": pqeq_result['Pi_a'],
+            "shell_disp": pqeq_result['shell_disp'],
+            "E1": pqeq_result['E1'],
+            "E2": pqeq_result['E2'],
+            "E_d2": pqeq_result['E_d2'],
             #"BEC": les_result["BEC"],
         }
 
