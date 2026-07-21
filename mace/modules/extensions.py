@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -90,10 +91,52 @@ class MACEPQEQ(ScaleShiftMACE):
         from bacenet.models.pqeq import BACENET, default_config
         bacenet_configs = default_config()
         bacenet_configs.update(pqeq_arguments)
+        # Full resolved PQEQ config actually used by BACENET (explicit
+        # pqeq_arguments merged on top of BACENET's default_config()).
+        # Kept as a plain attribute (not consumed in forward()) so callers
+        # can inspect what was defaulted vs. set explicitly.
+        self.pqeq_config: Dict[str, Any] = bacenet_configs
         self.pqeq_model = BACENET(accuracy=self.accuracy, n_shells=self.n_shells, pqeq=self.pqeq,
                                    analytic_ewald_derivative=self.analytic_ewald_derivative,
                                    exact_solver=self.exact_solver,
                                    configs=bacenet_configs)
+
+        # Log only the physically-meaningful, resolved per-species priors
+        # (not the full ~90-key config, most of which is unused training-
+        # script boilerplate in this MACE-composable path): the actual
+        # Chi0/J0 used (already reflects scale_chi0/scale_J0), the actual
+        # oxidation states used (override merged with the mendeleev table,
+        # skipping species with no resolvable value), and species_nelectrons
+        # only if the caller set it explicitly (this config key is read by
+        # BACENET's standalone training path but is NOT consulted by this
+        # MACE-composable forward(), which always derives shell electron
+        # counts from atomic number + n_shells -- surfaced here only so an
+        # explicit-but-unused setting isn't silently invisible).
+        species = self.pqeq_model.get_species_from_atomic_numbers(self.atomic_numbers)
+        try:
+            chi0, J0 = self.pqeq_model.estimate_species_chi0_J0(species)
+            logging.info(
+                "PQEQ Chi0/J0 (electronegativity, hardness) being used: "
+                + str({sym: (float(c), float(j)) for sym, c, j in zip(species, chi0, J0)})
+            )
+        except Exception as exc:  # pragma: no cover - logging only
+            logging.warning(f"Could not resolve PQEQ Chi0/J0 for logging: {exc}")
+
+        oxidation_states_used = {}
+        for atomic_number, sym in zip(self.atomic_numbers, species):
+            try:
+                oxidation_states_used[sym] = float(
+                    self.pqeq_model.estimate_species_q0([int(atomic_number)])[0]
+                )
+            except (TypeError, ValueError):
+                continue  # no resolvable oxidation state for this species
+        if oxidation_states_used:
+            logging.info(f"PQEQ oxidation states being used: {oxidation_states_used}")
+
+        if bacenet_configs.get('species_nelectrons') is not None:
+            logging.info(
+                f"PQEQ species_nelectrons set explicitly: {bacenet_configs['species_nelectrons']}"
+            )
 
         self.pqeq_e1_readouts = torch.nn.ModuleList()
         self.pqeq_e2_readouts = torch.nn.ModuleList()
