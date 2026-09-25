@@ -121,6 +121,15 @@ class MACEPQEQ(ScaleShiftMACE):
             )
         except Exception as exc:  # pragma: no cover - logging only
             logging.warning(f"Could not resolve PQEQ Chi0/J0 for logging: {exc}")
+        
+        try:
+            Zs = self.pqeq_model.estimate_species_nelectrons(self.atomic_numbers, self.n_shells)
+            logging.info(
+                "Shell charge being used: "
+                + str({sym: int(z) for sym, z in zip(species, Zs)})
+            )
+        except Exception as exc:  # pragma: no cover - logging only
+            logging.warning(f"Could not resolve shell charge for logging: {exc}")
 
         oxidation_states_used = {}
         for atomic_number, sym in zip(self.atomic_numbers, species):
@@ -141,6 +150,10 @@ class MACEPQEQ(ScaleShiftMACE):
         self.pqeq_e1_readouts = torch.nn.ModuleList()
         self.pqeq_e2_readouts = torch.nn.ModuleList()
         self.pqeq_e2d_readouts = torch.nn.ModuleList()
+        self.environment_dependent_gaussian_width = bacenet_configs.get(
+            'environment_dependent_gaussian_width', False)
+        if self.environment_dependent_gaussian_width:
+            self.pqeq_sigma_readouts = torch.nn.ModuleList()
         self.readout_input_dims = [
             _get_readout_input_dim(readout) for readout in self.readouts  # type: ignore
         ]
@@ -155,6 +168,10 @@ class MACEPQEQ(ScaleShiftMACE):
             self.pqeq_e2d_readouts.append(
                 _copy_mace_readout(readout, cueq_config=cueq_config)
             )
+            if self.environment_dependent_gaussian_width:
+                self.pqeq_sigma_readouts.append(
+                    _copy_mace_readout(readout, cueq_config=cueq_config)
+                )
 
     def forward(
         self,
@@ -266,6 +283,7 @@ class MACEPQEQ(ScaleShiftMACE):
         node_e1s_list: List[torch.Tensor] = []
         node_e2s_list: List[torch.Tensor] = []
         node_e2ds_list: List[torch.Tensor] = []
+        node_sigmas_list: List[torch.Tensor] = []
 
         for i, (interaction, product) in enumerate(
             zip(self.interactions, self.products)
@@ -306,12 +324,18 @@ class MACEPQEQ(ScaleShiftMACE):
             ]  
             node_e2ds = pqeq_e2d_readout(node_feats_list[feat_idx], node_heads)[
                 num_atoms_arange, node_heads
-            ]  
-            
+            ]
+
             node_es_list.append(node_es)
             node_e1s_list.append(node_e1s)
             node_e2s_list.append(node_e2s)
             node_e2ds_list.append(node_e2ds)
+
+            if hasattr(self, "pqeq_sigma_readouts"):
+                node_sigmas = self.pqeq_sigma_readouts[i](
+                    node_feats_list[feat_idx], node_heads
+                )[num_atoms_arange, node_heads]
+                node_sigmas_list.append(node_sigmas)
 
         node_feats_out = torch.cat(node_feats_list, dim=-1)
         node_inter_es = torch.sum(torch.stack(node_es_list, dim=0), dim=0)
@@ -336,11 +360,19 @@ class MACEPQEQ(ScaleShiftMACE):
             "batch":          data["batch"],
             "atomic_number":  self.atomic_numbers[data["node_attrs"].argmax(dim=-1)],
             "total_charge":   data["total_charge"],
-            "external_field": data.get("external_field", 
-                                       torch.zeros(len(data["total_charge"]), 3, 
-                                                   device=positions.device, 
+            "external_field": data.get("external_field",
+                                       torch.zeros(len(data["total_charge"]), 3,
+                                                   device=positions.device,
                                                    dtype=positions.dtype)),
         }
+        if hasattr(self, "pqeq_sigma_readouts"):
+            # Environment-dependent, core/shell-shared Gaussian width raw
+            # signal: pqeq.py's BACENET turns this into
+            # sigma_i = sigma_0_i + sigmoid(env_sigma_i) when
+            # configs['environment_dependent_gaussian_width'] is True.
+            pqeq_data["env_sigma"] = torch.sum(
+                torch.stack(node_sigmas_list, dim=1), dim=1
+            )
 
         pqeq_result = self.pqeq_model(pqeq_data)
 
@@ -385,8 +417,6 @@ class MACEPQEQ(ScaleShiftMACE):
                 batch=data["batch"],
                 cell=cell,
             )
-        #print("maceforces: ", forces)
-        #print("macestress: ", stress)
         return {
             "energy": total_energy,
             "node_energy": node_energy,
@@ -394,7 +424,6 @@ class MACEPQEQ(ScaleShiftMACE):
             "edge_forces": edge_forces,
             "virials": virials,
             "stress": stress,
-            #"stress": stress,
             "atomic_virials": atomic_virials,
             "atomic_stresses": atomic_stresses,
             "displacement": displacement,
@@ -407,7 +436,7 @@ class MACEPQEQ(ScaleShiftMACE):
             "E1": pqeq_result['E1'],
             "E2": pqeq_result['E2'],
             "E_d2": pqeq_result['E_d2'],
-            #"BEC": les_result["BEC"],
+            "gaussian_width": pqeq_result['gaussian_width'],
         }
 
 @compile_mode("script")
