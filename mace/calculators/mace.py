@@ -186,6 +186,8 @@ class MACECalculator(Calculator):
                     "polarizability_sh",
                 ]
             )
+        if model_type == "MACEPQEQ":
+            self.implemented_properties.extend(["polarization"])
 
         if model_paths is not None:
             if isinstance(model_paths, str):
@@ -375,6 +377,7 @@ class MACECalculator(Calculator):
             "atomic_stresses": [num_atoms, 3, 3],
             "atomic_virials": [num_atoms, 3, 3],
             "dipole": [3],
+            "polarization": [3],
             "charges": [num_atoms],
             "polarizability": [3, 3],
             "polarizability_sh": [6],
@@ -508,6 +511,7 @@ class MACECalculator(Calculator):
                 self.energy_units_to_eV / self.length_units_to_A**3,
             ),
             ("dipole", "dipole", 1.0),
+            ("polarization", "polarization", 1.0),
             ("charges", "charges", 1.0),
             ("polarizability", "polarizability", 1.0),
             ("polarizability_sh", "polarizability_sh", 1.0),

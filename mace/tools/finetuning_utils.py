@@ -292,7 +292,7 @@ def load_foundations_elements(
                         )
     _handled_attrs = {"interactions", "products", "readouts"}
     for attr_name, module in model.named_children():
-        if attr_name in _handled_attrs:
+        if attr_name in _handled_attrs or attr_name not in model_foundations._modules:
             continue
         submodules = (
             list(zip(module, model_foundations.__dict__["_modules"][attr_name]))

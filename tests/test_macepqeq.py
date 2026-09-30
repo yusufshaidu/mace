@@ -59,7 +59,7 @@ _mace_params = {
     "energy_weight": 1.0,
     "forces_weight": 10.0,
     "stress_weight": 1.0,
-    "model": "s",
+    "model": "MACEPQEQ",
     "hidden_irreps": "128x0e",
     "r_max": 3.5,
     "batch_size": 5,
@@ -146,28 +146,28 @@ def test_run_train(tmp_path, fitting_configs):
 
     print("Es", Es)
     ref_Es = [
-        0.004919160731848143,
-        0.5906680240792959,
-        0.47887544882572264,
-        0.4176002467254094,
-        0.5606673227439406,
-        0.40181714730443363,
-        0.3367534132795259,
-        0.27118917957971056,
-        0.47967529915910134,
-        0.32077479180773283,
-        1.2865402405977537,
-        0.3472478715875782,
-        0.427734507004752,
-        0.8092185237225293,
-        0.38348242384362774,
-        0.14448973657513398,
-        0.5650118900854595,
-        0.429029669763921,
-        0.4837945154901776,
-        0.2244894146891574,
-        0.3667896493444026,
-        0.23811703879534651,
+        0.6053161179236876,
+        -0.0499397763377861,
+        0.5083031001821479,
+        0.46306650160693347,
+        0.5928255238975046,
+        0.45313289234912185,
+        0.39980805357476035,
+        0.5633391375601936,
+        0.50064341512768,
+        0.3739544345781898,
+        0.6242648595722176,
+        0.406235156343909,
+        0.46801145071724465,
+        0.4914770554736677,
+        0.4447275207162204,
+        0.3345730002090737,
+        0.5271172089989451,
+        0.4714502690519372,
+        0.40296974059074075,
+        0.3003963779288917,
+        0.44688493817033315,
+        0.3735358481785316,
     ]
     assert np.allclose(Es, ref_Es)
 
@@ -238,7 +238,7 @@ def test_run_train_macepqeq_cueq(tmp_path, fitting_configs):
 
 @pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
 def test_macepqeq_forward_outputs_charges(macepqeq_model_path: Path, fitting_configs):
-    """Tests that MACEPQEQ forward pass outputs charges and dipoles."""
+    """Tests that MACEPQEQ forward pass outputs charges and the dipole."""
     model = torch.load(f=str(macepqeq_model_path), map_location="cpu")
     model.eval()
 
@@ -247,20 +247,24 @@ def test_macepqeq_forward_outputs_charges(macepqeq_model_path: Path, fitting_con
 
     z_table = utils.AtomicNumberTable([int(z) for z in model.atomic_numbers])
     configs = [data.config_from_atoms(atoms) for atoms in periodic_configs]
-    data_loader = torch_geometric.dataloader.DataLoader(
-        dataset=[
-            data.AtomicData.from_config(cfg, z_table=z_table, cutoff=float(model.r_max))
-            for cfg in configs
-        ],
-        batch_size=3,
-        shuffle=False,
-    )
+    with default_dtype(torch.float32):
+        data_loader = torch_geometric.dataloader.DataLoader(
+            dataset=[
+                data.AtomicData.from_config(cfg, z_table=z_table, cutoff=float(model.r_max))
+                for cfg in configs
+            ],
+            batch_size=3,
+            shuffle=False,
+        )
 
-    for batch in data_loader:
-        output = model(batch.to_dict(), compute_stress=True)
+        for batch in data_loader:
+            output = model(batch.to_dict(), compute_stress=True)
 
     assert "charges" in output, "MACEPQEQ output must contain 'charges'"
-    assert "dipoles" in output, "MACEPQEQ output must contain 'dipoles'"
+    assert "dipole" in output, "MACEPQEQ output must contain 'dipole'"
+    assert "polarization" in output, "MACEPQEQ output must contain 'polarization'"
+    volume = torch.abs(torch.linalg.det(batch["cell"].reshape(-1, 3, 3)))
+    torch.testing.assert_close(output["dipole"], output["polarization"] * volume.unsqueeze(1))
     assert "energy" in output
     assert "forces" in output
     assert output["charges"].shape[0] == sum(len(c) for c in periodic_configs)
