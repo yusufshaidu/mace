@@ -225,8 +225,15 @@ def print_git_commit():
 
 
 def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
-    if model.__class__.__name__ not in ["ScaleShiftMACE", "MACELES", "PolarMACE"]:
-        return {"error": "Model is not a ScaleShiftMACE, MACELES, or PolarMACE model"}
+    if model.__class__.__name__ not in [
+        "ScaleShiftMACE",
+        "MACELES",
+        "PolarMACE",
+        "MACEPQEQ",
+    ]:
+        return {
+            "error": "Model is not a ScaleShiftMACE, MACELES, PolarMACE, or MACEPQEQ model"
+        }
 
     def radial_to_name(radial_type):
         if radial_type == "BesselBasis":
@@ -318,6 +325,10 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "atomic_inter_shift": shift.cpu().numpy(),
         "heads": heads,
     }
+    if model.__class__.__name__ == "MACEPQEQ":
+        config["pqeq"] = model.pqeq
+        config["pqeq_arguments"] = dict(model.pqeq_config)
+        config["pqeq_heads"] = list(getattr(model, "pqeq_heads", heads))
     if model.__class__.__name__ == "AtomicDielectricMACE":
         config["use_polarizability"] = model.use_polarizability
         config["only_dipole"] = False  # model.only_dipole
@@ -915,6 +926,21 @@ def get_params_options(
                 "name": "pqeq_gaussian_width",
                 "params": model.pqeq_model.gaussian_width_embedding.parameters(),
                 "weight_decay": 0.0,
+            }
+        )
+    pqeq_readout_params = [
+        p
+        for name, module in model.named_children()
+        if name.startswith("pqeq_") and name.endswith("_readouts")
+        for p in module.parameters()
+    ]
+    if pqeq_readout_params:
+        param_options["params"].append(
+            {
+                "name": "pqeq_readouts",
+                "params": pqeq_readout_params,
+                "weight_decay": 0.0,
+                "lr": lr_params_factors.get("pqeq_readouts_lr_factor", 1.0) * args.lr,
             }
         )
     return param_options

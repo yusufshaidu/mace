@@ -1121,6 +1121,24 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=None,
         required=False,
     )
+    parser.add_argument(
+        "--pqeq_heads",
+        help="Comma-separated heads that get PQEQ electrostatics. Default: all heads, "
+        "except pt_head when fine-tuning from a foundation without electrostatics",
+        type=str,
+        default=None,
+        required=False,
+    )
+    parser.add_argument(
+        "--pqeq_head_init",
+        help="Initialization of PQEQ readouts the foundation model does not have: "
+        "'zero' zeroes their last layer so the electrostatic parameters start at the "
+        "tabulated priors, 'random' keeps the default initialization",
+        type=str,
+        choices=["zero", "random"],
+        default="zero",
+        required=False,
+    )
     return parser
 
 

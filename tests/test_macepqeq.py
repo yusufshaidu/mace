@@ -146,28 +146,28 @@ def test_run_train(tmp_path, fitting_configs):
 
     print("Es", Es)
     ref_Es = [
-        0.6043113641025035,
-        -0.05078365418256849,
-        0.5072612686126654,
-        0.4619926231316191,
-        0.5914799697139942,
-        0.45201822526225355,
-        0.39872649725225184,
-        0.5619646417795001,
-        0.4995611646829949,
-        0.37282792241894924,
-        0.6230065887336291,
-        0.4051279368340454,
-        0.4670458979835769,
-        0.49088029664973426,
-        0.4436757320753177,
-        0.3338279058346557,
-        0.5259491719494858,
-        0.4704294132815311,
-        0.40225596557348126,
-        0.29939328573977764,
-        0.4461213899408198,
-        0.37258082631413336,
+        0.6020793433333951,
+        -0.04897875436345805,
+        0.5105856021772198,
+        0.46533330254596983,
+        0.5930650715827769,
+        0.4550156347621205,
+        0.401680205241765,
+        0.5653813933989743,
+        0.5029856165753587,
+        0.3757482381662212,
+        0.6276906636632577,
+        0.4083639152204791,
+        0.4706426422216971,
+        0.4925230371485189,
+        0.44705004540840837,
+        0.33613012354948674,
+        0.5290351943665962,
+        0.47394776659687043,
+        0.4043022325669644,
+        0.3020163432834793,
+        0.44960464855404125,
+        0.37537264290874556,
     ]
     assert np.allclose(Es, ref_Es)
 
@@ -334,3 +334,315 @@ def test_run_eval_macepqeq_basic(
         assert "MACE_energy" in at.info
         assert "MACE_stress" in at.info
         assert "MACE_forces" in at.arrays
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+@pytest.mark.parametrize(
+    "pqeq, pqeq_arguments",
+    [
+        (True, {}),
+        (False, {}),
+        (True, {"environment_dependent_gaussian_width": True}),
+    ],
+)
+def test_macepqeq_optimizer_covers_all_parameters(pqeq, pqeq_arguments):
+    from argparse import Namespace
+
+    from mace.tools.scripts_utils import get_optimizer, get_params_options
+
+    with default_dtype(torch.float64):
+        torch.manual_seed(0)
+        model = MACEPQEQ(pqeq=pqeq, pqeq_arguments=pqeq_arguments, **MODEL_CONFIG)
+    args = Namespace(
+        lr_params_factors="{}",
+        freeze=None,
+        lr=1e-2,
+        weight_decay=0.0,
+        amsgrad=False,
+        beta=0.9,
+        optimizer="adam",
+    )
+    param_options = get_params_options(args, model)
+    counts = {}
+    for group in param_options["params"]:
+        group["params"] = list(group["params"])
+        for p in group["params"]:
+            counts[id(p)] = counts.get(id(p), 0) + 1
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            assert counts.get(id(p), 0) == 1, name
+
+    optimizer = get_optimizer(args, param_options)
+    heads = [n for n, _ in model.named_parameters() if n.startswith("pqeq_e")]
+    heads += [n for n, _ in model.named_parameters() if n.startswith("pqeq_sigma")]
+    assert heads
+    before = {n: p.detach().clone() for n, p in model.named_parameters()}
+    sum(p.sum() for p in model.parameters()).backward()
+    optimizer.step()
+    params = dict(model.named_parameters())
+    for name in heads:
+        assert not torch.equal(before[name], params[name].detach()), name
+
+
+FINETUNE_CONFIG = {
+    **MODEL_CONFIG,
+    "num_interactions": 2,
+    "interaction_cls_first": interaction_classes["RealAgnosticInteractionBlock"],
+}
+
+
+class PolarMACE(ScaleShiftMACE):
+    """Stand-in for a foundation class with its own long-range electrostatics."""
+
+
+def _two_head_config(base=None):
+    return {
+        **(base or MODEL_CONFIG),
+        "heads": ["pt_head", "Default"],
+        "atomic_energies": np.zeros((2, 2)),
+        "atomic_inter_shift": [0.0, 0.0],
+        "atomic_inter_scale": [1.0, 1.0],
+    }
+
+
+def _head_batch(model, fitting_configs, heads, graph_heads):
+    periodic = [c for c in fitting_configs if c.pbc.any()][: len(graph_heads)]
+    z_table = utils.AtomicNumberTable([int(z) for z in model.atomic_numbers])
+    configs = []
+    for atoms, head in zip(periodic, graph_heads):
+        cfg = data.config_from_atoms(atoms)
+        cfg.head = head
+        configs.append(cfg)
+    loader = torch_geometric.dataloader.DataLoader(
+        dataset=[
+            data.AtomicData.from_config(
+                cfg, z_table=z_table, cutoff=float(model.r_max), heads=heads
+            )
+            for cfg in configs
+        ],
+        batch_size=len(configs),
+        shuffle=False,
+    )
+    return next(iter(loader)).to_dict()
+
+
+def _randomize(model, scale=0.1):
+    torch.manual_seed(1)
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(scale * torch.randn_like(p))
+
+
+def _run_and_capture(monkeypatch, params):
+    import mace.cli.run_train as run_train_module
+
+    captured = {}
+    original = run_train_module.get_params_options
+
+    def spy(args, model):
+        captured["model"] = model
+        captured["initial"] = {
+            n: p.detach().clone() for n, p in model.named_parameters()
+        }
+        return original(args, model)
+
+    monkeypatch.setattr(run_train_module, "get_params_options", spy)
+    args = build_default_arg_parser().parse_args(
+        [f"--{k}={v}" if v is not None else f"--{k}" for k, v in params.items()]
+    )
+    mace_run(args)
+    return captured
+
+
+def _last_layer(readout):
+    return readout.linear if hasattr(readout, "linear") else readout.linear_2
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+@pytest.mark.parametrize("analytic", [True, False])
+def test_pqeq_heads_mask_electrostatics(fitting_configs, analytic):
+    with default_dtype(torch.float64):
+        args = {"analytic_ewald_derivative": analytic}
+        model = MACEPQEQ(pqeq=True, pqeq_arguments=args, pqeq_heads=["Default"], **_two_head_config())
+        _randomize(model)
+        reference = MACEPQEQ(pqeq=True, pqeq_arguments=args, pqeq_heads=[], **_two_head_config())
+        reference.load_state_dict(model.state_dict())
+        assert model.pqeq_head_flags == [0.0, 1.0]
+        assert reference.pqeq_head_flags == [0.0, 0.0]
+
+        batch = _head_batch(model, fitting_configs, ["pt_head", "Default"], ["pt_head", "Default"])
+        out = model(batch, compute_stress=True)
+        ref = reference(_head_batch(model, fitting_configs, ["pt_head", "Default"], ["pt_head", "Default"]),
+                        compute_stress=True)
+
+    pt_atoms = batch["batch"] == 0
+    assert out["energy_pqeq"][0].item() == 0.0
+    assert abs(out["energy_pqeq"][1].item()) > 1e-6
+    torch.testing.assert_close(out["energy"][0], ref["energy"][0])
+    torch.testing.assert_close(out["forces"][pt_atoms], ref["forces"][pt_atoms])
+    torch.testing.assert_close(out["stress"][0], ref["stress"][0])
+    torch.testing.assert_close(out["energy"][1] - ref["energy"][1], out["energy_pqeq"][1])
+    assert not torch.allclose(out["forces"][~pt_atoms], ref["forces"][~pt_atoms])
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_zero_pqeq_readouts_start_at_priors(fitting_configs):
+    with default_dtype(torch.float64):
+        model = MACEPQEQ(pqeq=True, pqeq_arguments={"environment_dependent_gaussian_width": True},
+                         **MODEL_CONFIG)
+        _randomize(model)
+        model.zero_pqeq_readouts()
+        assert set(model.pqeq_readout_names()) == {
+            "pqeq_e1_readouts", "pqeq_e2_readouts", "pqeq_e2d_readouts", "pqeq_sigma_readouts"
+        }
+        for name in model.pqeq_readout_names():
+            for readout in getattr(model, name):
+                assert torch.count_nonzero(_last_layer(readout).weight) == 0
+        out = model(_head_batch(model, fitting_configs, ["Default"], ["Default"]))
+    chi0, J0 = model.pqeq_model.estimate_species_chi0_J0(
+        model.pqeq_model.get_species_from_atomic_numbers(model.atomic_numbers)
+    )
+    assert out["E1"].abs().max() > 0
+    assert torch.unique(out["E1"]).numel() <= 2
+    assert torch.unique(out["E2"]).numel() <= 2
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_remove_pt_head_keeps_pqeq(fitting_configs):
+    from mace.tools.scripts_utils import extract_config_mace_model, remove_pt_head
+
+    with default_dtype(torch.float64):
+        model = MACEPQEQ(pqeq=True, pqeq_arguments={"gaussian_width_tanh_scale": 0.4},
+                         **_two_head_config())
+        _randomize(model)
+        config = extract_config_mace_model(model)
+        assert config["pqeq"] is True
+        assert config["pqeq_arguments"]["gaussian_width_tanh_scale"] == 0.4
+        assert config["pqeq_heads"] == ["pt_head", "Default"]
+
+        single = remove_pt_head(model, "Default")
+        assert isinstance(single, MACEPQEQ)
+        assert single.heads == ["Default"]
+        assert single.pqeq_config["gaussian_width_tanh_scale"] == 0.4
+        out = model(_head_batch(model, fitting_configs, ["pt_head", "Default"], ["Default"] * 2))
+        got = single(_head_batch(single, fitting_configs, ["Default"], ["Default"] * 2))
+    for key in ("energy", "forces", "charges", "E1", "E2", "E_d2"):
+        torch.testing.assert_close(got[key], out[key], msg=key)
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_load_pqeq_foundation_into_multihead(fitting_configs):
+    from mace.tools.finetuning_utils import load_foundations_elements
+
+    with default_dtype(torch.float64):
+        foundation = MACEPQEQ(pqeq=True, **FINETUNE_CONFIG)
+        _randomize(foundation)
+        model = MACEPQEQ(pqeq=True, **_two_head_config(FINETUNE_CONFIG))
+        model = load_foundations_elements(
+            model,
+            foundation,
+            utils.AtomicNumberTable([1, 8]),
+            load_readout=True,
+            max_L=1,
+            default_dtype=torch.float64,
+        )
+        ref = foundation(_head_batch(foundation, fitting_configs, ["Default"], ["Default"] * 2))
+        for head in ("pt_head", "Default"):
+            out = model(_head_batch(model, fitting_configs, ["pt_head", "Default"], [head] * 2))
+            for key in ("energy", "forces", "charges", "E1", "E2", "E_d2"):
+                torch.testing.assert_close(out[key], ref[key], msg=f"{head} {key}")
+
+
+def _finetune_params(tmp_path, foundation_path):
+    params = _mace_params.copy()
+    params.update(
+        checkpoints_dir=str(tmp_path),
+        model_dir=str(tmp_path),
+        train_file=tmp_path / "fit.xyz",
+        foundation_model=str(foundation_path),
+        default_dtype="float64",
+        multiheads_finetuning=False,
+        max_num_epochs=2,
+        E0s="average",
+    )
+    for key in ("hidden_irreps", "r_max"):
+        params.pop(key)
+    return params
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_finetune_macepqeq_from_mace_foundation(tmp_path, fitting_configs, monkeypatch):
+    ase.io.write(tmp_path / "fit.xyz", fitting_configs)
+    with default_dtype(torch.float64):
+        foundation = ScaleShiftMACE(**FINETUNE_CONFIG)
+        _randomize(foundation)
+    foundation_path = tmp_path / "foundation.model"
+    torch.save(foundation, foundation_path)
+    params = _finetune_params(tmp_path, foundation_path)
+    params["pqeq"] = None
+    captured = _run_and_capture(monkeypatch, params)
+
+    initial = captured["initial"]
+    model = captured["model"]
+    assert model.pqeq and hasattr(model, "pqeq_e2d_readouts")
+    for name, p in foundation.named_parameters():
+        if name.startswith("interactions.") or name.startswith("products."):
+            torch.testing.assert_close(initial[name], p.detach(), msg=name)
+    for name in model.pqeq_readout_names():
+        for i, readout in enumerate(getattr(model, name)):
+            last = "linear" if hasattr(readout, "linear") else "linear_2"
+            assert torch.count_nonzero(initial[f"{name}.{i}.{last}.weight"]) == 0
+
+    trained = torch.load(tmp_path / "MACE.model", map_location="cpu")
+    assert torch.count_nonzero(_last_layer(trained.pqeq_e1_readouts[0]).weight) > 0
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_finetune_macepqeq_from_macepqeq_foundation(tmp_path, fitting_configs, monkeypatch):
+    ase.io.write(tmp_path / "fit.xyz", fitting_configs)
+    with default_dtype(torch.float64):
+        foundation = MACEPQEQ(pqeq=True, pqeq_arguments={"gaussian_width_tanh_scale": 0.4},
+                              **FINETUNE_CONFIG)
+        _randomize(foundation)
+    foundation_path = tmp_path / "foundation.model"
+    torch.save(foundation, foundation_path)
+
+    captured = _run_and_capture(monkeypatch, _finetune_params(tmp_path, foundation_path))
+    model = captured["model"]
+    initial = captured["initial"]
+    assert model.pqeq
+    assert model.pqeq_config["gaussian_width_tanh_scale"] == 0.4
+    assert model.pqeq_heads == list(model.heads)
+    for name, p in foundation.named_parameters():
+        if name.startswith("pqeq_"):
+            torch.testing.assert_close(initial[name], p.detach(), msg=name)
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_finetune_macepqeq_rejects_long_range_foundation(tmp_path, fitting_configs):
+    ase.io.write(tmp_path / "fit.xyz", fitting_configs)
+    with default_dtype(torch.float64):
+        foundation = PolarMACE(**FINETUNE_CONFIG)
+    foundation_path = tmp_path / "polar.model"
+    torch.save(foundation, foundation_path)
+    args = build_default_arg_parser().parse_args(
+        [f"--{k}={v}" if v is not None else f"--{k}"
+         for k, v in _finetune_params(tmp_path, foundation_path).items()]
+    )
+    with pytest.raises(ValueError, match="PolarMACE"):
+        mace_run(args)
+
+
+def test_pqeq_heads_selection():
+    from argparse import Namespace
+
+    from mace.tools.model_script_utils import _pqeq_heads
+
+    heads = ["pt_head", "Default"]
+    assert _pqeq_heads(Namespace(pqeq_heads=None), heads) == heads
+    assert _pqeq_heads(Namespace(pqeq_heads=None), heads, {}) == ["Default"]
+    pqeq_foundation = {"pqeq": True, "pqeq_arguments": {"n_shells": 1}}
+    assert _pqeq_heads(Namespace(pqeq_heads=None), heads, pqeq_foundation) == heads
+    assert _pqeq_heads(Namespace(pqeq_heads="pt_head, Default"), heads, {}) == heads
+    with pytest.raises(ValueError, match="unknown heads"):
+        _pqeq_heads(Namespace(pqeq_heads="water"), heads)
