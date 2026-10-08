@@ -403,7 +403,8 @@ class MACEPQEQ(ScaleShiftMACE):
         )
         if not torch.isnan(pqeq_result['forces']).any():
             forces += pqeq_result['forces']
-            stress += pqeq_result['stress']
+            if stress is not None:
+                stress += pqeq_result['stress']
 
         # Add Coulomb term to forces and stress 
         atomic_virials: Optional[torch.Tensor] = None
