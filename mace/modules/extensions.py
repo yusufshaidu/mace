@@ -149,7 +149,11 @@ class MACEPQEQ(ScaleShiftMACE):
 
         self.pqeq_e1_readouts = torch.nn.ModuleList()
         self.pqeq_e2_readouts = torch.nn.ModuleList()
-        self.pqeq_e2d_readouts = torch.nn.ModuleList()
+        # E_d2 (shell spring constant) is only consumed by pQEq; with plain QEq
+        # (pqeq=False) BACENET ignores it, so its readouts would receive no
+        # gradient and break DDP.
+        if self.pqeq:
+            self.pqeq_e2d_readouts = torch.nn.ModuleList()
         self.environment_dependent_gaussian_width = bacenet_configs.get(
             'environment_dependent_gaussian_width', False)
         if self.environment_dependent_gaussian_width:
@@ -165,9 +169,10 @@ class MACEPQEQ(ScaleShiftMACE):
             self.pqeq_e2_readouts.append(
                 _copy_mace_readout(readout, cueq_config=cueq_config)
             )
-            self.pqeq_e2d_readouts.append(
-                _copy_mace_readout(readout, cueq_config=cueq_config)
-            )
+            if self.pqeq:
+                self.pqeq_e2d_readouts.append(
+                    _copy_mace_readout(readout, cueq_config=cueq_config)
+                )
             if self.environment_dependent_gaussian_width:
                 self.pqeq_sigma_readouts.append(
                     _copy_mace_readout(readout, cueq_config=cueq_config)
@@ -309,8 +314,8 @@ class MACEPQEQ(ScaleShiftMACE):
             )
             node_feats_list.append(node_feats)
 
-        for i, (readout, pqeq_e1_readout, pqeq_e2_readout, pqeq_e2d_readout) in enumerate(
-            zip(self.readouts, self.pqeq_e1_readouts, self.pqeq_e2_readouts, self.pqeq_e2d_readouts)
+        for i, (readout, pqeq_e1_readout, pqeq_e2_readout) in enumerate(
+            zip(self.readouts, self.pqeq_e1_readouts, self.pqeq_e2_readouts)
         ):
             feat_idx = -1 if len(self.readouts) == 1 else i
             node_es = readout(node_feats_list[feat_idx], node_heads)[
@@ -322,14 +327,15 @@ class MACEPQEQ(ScaleShiftMACE):
             node_e2s = pqeq_e2_readout(node_feats_list[feat_idx], node_heads)[
                 num_atoms_arange, node_heads
             ]  
-            node_e2ds = pqeq_e2d_readout(node_feats_list[feat_idx], node_heads)[
-                num_atoms_arange, node_heads
-            ]
-
             node_es_list.append(node_es)
             node_e1s_list.append(node_e1s)
             node_e2s_list.append(node_e2s)
-            node_e2ds_list.append(node_e2ds)
+
+            if hasattr(self, "pqeq_e2d_readouts"):
+                node_e2ds = self.pqeq_e2d_readouts[i](
+                    node_feats_list[feat_idx], node_heads
+                )[num_atoms_arange, node_heads]
+                node_e2ds_list.append(node_e2ds)
 
             if hasattr(self, "pqeq_sigma_readouts"):
                 node_sigmas = self.pqeq_sigma_readouts[i](
@@ -346,7 +352,10 @@ class MACEPQEQ(ScaleShiftMACE):
         node_energy = node_e0.clone().double() + node_inter_es.clone().double()
         e1_pqeq = torch.sum(torch.stack(node_e1s_list, dim=1), dim=1)
         e2_pqeq = torch.sum(torch.stack(node_e2s_list, dim=1), dim=1)
-        e2d_pqeq = torch.sum(torch.stack(node_e2ds_list, dim=1), dim=1)
+        if hasattr(self, "pqeq_e2d_readouts"):
+            e2d_pqeq = torch.sum(torch.stack(node_e2ds_list, dim=1), dim=1)
+        else:
+            e2d_pqeq = torch.zeros_like(e2_pqeq)
 
 
         pqeq_data = {
