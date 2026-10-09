@@ -78,6 +78,7 @@ def configure_model(
         logging.info("Using embedding specifications from command line arguments")
         logging.info(f"Embedding specifications: {args.embedding_specs}")
     # Build model
+    foundation_pqeq = {}
     if model_foundation is not None and args.model in [
         "MACE",
         "ScaleShiftMACE",
@@ -86,7 +87,23 @@ def configure_model(
         "MACEPQEQ",
     ]:
         logging.info("Loading FOUNDATION model")
+        foundation_class = model_foundation.__class__.__name__
+        if args.model == "MACEPQEQ" and foundation_class in ("MACELES", "PolarMACE"):
+            raise ValueError(
+                f"Cannot fine-tune MACEPQEQ from a {foundation_class} foundation: "
+                "it already has its own long-range electrostatics, which would be counted twice"
+            )
         model_config_foundation = extract_config_mace_model(model_foundation)
+        foundation_pqeq = {
+            key: model_config_foundation.pop(key)
+            for key in ("pqeq", "pqeq_arguments", "pqeq_heads")
+            if key in model_config_foundation
+        }
+        if foundation_pqeq and args.model != "MACEPQEQ":
+            logging.warning(
+                "The foundation is a MACEPQEQ model but --model is not MACEPQEQ: "
+                "its electrostatic heads are dropped"
+            )
         model_config_foundation["atomic_energies"] = atomic_energies
 
         if args.foundation_model_elements:
@@ -198,7 +215,9 @@ def configure_model(
         )
         model_config_foundation = None
 
-    model = _build_model(args, model_config, model_config_foundation, heads)
+    model = _build_model(
+        args, model_config, model_config_foundation, heads, foundation_pqeq
+    )
 
     if model_foundation is not None:
         model = load_foundations_elements(
@@ -209,8 +228,58 @@ def configure_model(
             max_L=args.max_L,
             default_dtype=dtype_dict.get(args.default_dtype, torch.float64),
         )
+        if model.__class__.__name__ == "MACEPQEQ":
+            missing = [
+                name
+                for name in model.pqeq_readout_names()
+                if name not in model_foundation._modules  # pylint: disable=protected-access
+            ]
+            if missing and getattr(args, "pqeq_head_init", "zero") == "zero":
+                logging.info(
+                    f"Zero-initializing the last layer of {missing}: "
+                    "the electrostatic parameters start at the tabulated priors"
+                )
+                model.zero_pqeq_readouts(missing)
+            logging.info(f"PQEQ electrostatics applied to heads: {model.pqeq_heads}")
 
     return model, output_args
+
+
+def _pqeq_arguments(args, base=None):
+    """Merge the PQEQ defaults, the foundation's PQEQ config (if any) and --pqeq_arguments, later ones winning."""
+    from mace.tools.arg_parser import read_yaml
+
+    defaults = {
+        "accuracy": args.accuracy,
+        "n_shells": args.n_shells,
+        "analytic_ewald_derivative": True,
+        "exact_solver": True,
+    }
+    user = args.pqeq_arguments
+    if user is None:
+        user = {}
+    elif isinstance(user, str):
+        try:
+            user = ast.literal_eval(user)
+        except (ValueError, SyntaxError):
+            user = read_yaml(user)
+    pqeq_arguments = {**defaults, **(base or {}), **user}
+    logging.info(f"pqeq_arguments: {pqeq_arguments}")
+    return pqeq_arguments
+
+
+def _pqeq_heads(args, heads, foundation_pqeq=None):
+    """Heads that get PQEQ electrostatics: --pqeq_heads if given, else all heads, except pt_head when
+    fine-tuning from a foundation without electrostatics."""
+    if getattr(args, "pqeq_heads", None):
+        selected = [h.strip() for h in args.pqeq_heads.split(",") if h.strip()]
+        unknown = [h for h in selected if h not in heads]
+        if unknown:
+            raise ValueError(f"--pqeq_heads names unknown heads {unknown}; heads are {heads}")
+        return selected
+    if foundation_pqeq is not None and not foundation_pqeq.get("pqeq_arguments"):
+        return [h for h in heads if h != "pt_head"]
+    return list(heads)
 
 
 def _determine_atomic_inter_shift(mean, heads):
@@ -241,7 +310,7 @@ def _parse_literal_or_none(value):
 
 
 def _build_model(
-    args, model_config, model_config_foundation, heads
+    args, model_config, model_config_foundation, heads, foundation_pqeq=None
 ):  # pylint: disable=too-many-return-statements
     if args.model == "MACE":
         if args.interaction_first not in [
@@ -339,30 +408,11 @@ def _build_model(
         )
     if args.model == "FoundationMACEPQEQ":
         from mace.modules.extensions import MACEPQEQ
-        from mace.tools.arg_parser import read_yaml
-
-        _DEFAULT_PQEQ_ARGUMENTS = {
-            'accuracy': args.accuracy,
-            'n_shells': args.n_shells,
-            'analytic_ewald_derivative': True,
-            'exact_solver': True,
-        }
-
-        pqeq_arguments = args.pqeq_arguments
-        if pqeq_arguments is None:
-            pqeq_arguments = _DEFAULT_PQEQ_ARGUMENTS.copy()
-            print("No pqeq_arguments provided, using default values:")
-        elif isinstance(pqeq_arguments, str):
-            try:
-                pqeq_arguments = ast.literal_eval(pqeq_arguments)
-            except (ValueError, SyntaxError):
-                pqeq_arguments = read_yaml(pqeq_arguments)
-            pqeq_arguments = {**_DEFAULT_PQEQ_ARGUMENTS, **pqeq_arguments}
-            print(f"pqeq_arguments: {pqeq_arguments}")
 
         return MACEPQEQ(
-            pqeq=args.pqeq,
-            pqeq_arguments=pqeq_arguments,
+            pqeq=args.pqeq or bool(foundation_pqeq.get("pqeq", False)),
+            pqeq_arguments=_pqeq_arguments(args, foundation_pqeq.get("pqeq_arguments")),
+            pqeq_heads=_pqeq_heads(args, heads, foundation_pqeq),
             **model_config_foundation,
         )
     if args.model == "ScaleShiftBOTNet":
@@ -446,29 +496,11 @@ def _build_model(
         )
     if args.model == "MACEPQEQ":
         from mace.modules.extensions import MACEPQEQ
-        from mace.tools.arg_parser import read_yaml
 
-        _DEFAULT_PQEQ_ARGUMENTS = {
-            'accuracy': 1e-4,
-            'n_shells': 1,
-            'analytic_ewald_derivative': True,
-            'exact_solver': True,
-        }
-
-        pqeq_arguments = args.pqeq_arguments
-        if pqeq_arguments is None:
-            pqeq_arguments = _DEFAULT_PQEQ_ARGUMENTS.copy()
-            print("No pqeq_arguments provided, using default values:")
-        elif isinstance(pqeq_arguments, str):
-            try:
-                pqeq_arguments = ast.literal_eval(pqeq_arguments)
-            except (ValueError, SyntaxError):
-                pqeq_arguments = read_yaml(pqeq_arguments)
-            pqeq_arguments = {**_DEFAULT_PQEQ_ARGUMENTS, **pqeq_arguments}
-            print(f"pqeq_arguments: {pqeq_arguments}")
         return MACEPQEQ(
             pqeq=args.pqeq,
-            pqeq_arguments=pqeq_arguments,
+            pqeq_arguments=_pqeq_arguments(args),
+            pqeq_heads=_pqeq_heads(args, heads),
             **model_config,
             pair_repulsion=args.pair_repulsion,
             distance_transform=args.distance_transform,

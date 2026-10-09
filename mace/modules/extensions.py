@@ -77,10 +77,23 @@ def _get_readout_input_dim(block: torch.nn.Module) -> int:
 
 @compile_mode("script")
 class MACEPQEQ(ScaleShiftMACE):
-    def __init__(self, pqeq = True, pqeq_arguments: Optional[Dict] = None, **kwargs):
+    def __init__(
+        self,
+        pqeq=True,
+        pqeq_arguments: Optional[Dict] = None,
+        pqeq_heads: Optional[List[str]] = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         if pqeq_arguments is None:
             pqeq_arguments = {}
+        model_heads = list(self.heads) if hasattr(self, "heads") else ["Default"]
+        if pqeq_heads is None:
+            pqeq_heads = model_heads
+        self.pqeq_heads: List[str] = [h for h in model_heads if h in pqeq_heads]
+        self.pqeq_head_flags: List[float] = [
+            1.0 if h in self.pqeq_heads else 0.0 for h in model_heads
+        ]
 
         self.pqeq = pqeq
         self.accuracy = pqeq_arguments.get('accuracy', 1e-4)
@@ -91,6 +104,13 @@ class MACEPQEQ(ScaleShiftMACE):
         from bacenet.models.pqeq import BACENET, default_config
         bacenet_configs = default_config()
         bacenet_configs.update(pqeq_arguments)
+        bacenet_configs.update(
+            accuracy=self.accuracy,
+            n_shells=self.n_shells,
+            analytic_ewald_derivative=self.analytic_ewald_derivative,
+            exact_solver=self.exact_solver,
+            pqeq=self.pqeq,
+        )
         # Full resolved PQEQ config actually used by BACENET (explicit
         # pqeq_arguments merged on top of BACENET's default_config()).
         # Kept as a plain attribute (not consumed in forward()) so callers
@@ -177,6 +197,29 @@ class MACEPQEQ(ScaleShiftMACE):
                 self.pqeq_sigma_readouts.append(
                     _copy_mace_readout(readout, cueq_config=cueq_config)
                 )
+        if self.environment_dependent_gaussian_width:
+            self.zero_pqeq_readouts(["pqeq_sigma_readouts"])
+
+    @torch.jit.unused
+    def pqeq_readout_names(self) -> List[str]:
+        """Names of the PQEQ readout ModuleLists present on this model."""
+        return [
+            name
+            for name, _ in self.named_children()
+            if name.startswith("pqeq_") and name.endswith("_readouts")
+        ]
+
+    @torch.jit.unused
+    def zero_pqeq_readouts(self, names: Optional[List[str]] = None) -> None:
+        """Zero the last linear layer of the given PQEQ readouts (all by default), so they start at the tabulated priors."""
+        for name in names if names is not None else self.pqeq_readout_names():
+            for readout in getattr(self, name):
+                last = readout.linear if hasattr(readout, "linear") else readout.linear_2
+                with torch.no_grad():
+                    last.weight.zero_()
+                    bias = getattr(last, "bias", None)
+                    if bias is not None and bias.numel() > 0:
+                        bias.zero_()
 
     def forward(
         self,
@@ -385,9 +428,18 @@ class MACEPQEQ(ScaleShiftMACE):
 
         pqeq_result = self.pqeq_model(pqeq_data)
 
+        graph_heads = (
+            data["head"]
+            if "head" in data
+            else torch.zeros(num_graphs, dtype=torch.long, device=positions.device)
+        )
+        head_mask = torch.tensor(
+            self.pqeq_head_flags, dtype=positions.dtype, device=positions.device
+        )[graph_heads]
+
         # sum over E1*charges + 0.5*E2*charges^2 + 0.5*E2d*disp*disp
-        energy_pqeq_local = pqeq_result['energy_pqeq_local']
-        energy_pqeq_ewald_field = pqeq_result['energy']
+        energy_pqeq_local = pqeq_result['energy_pqeq_local'] * head_mask
+        energy_pqeq_ewald_field = pqeq_result['energy'] * head_mask
         energy_pqeq = energy_pqeq_local + energy_pqeq_ewald_field
         total_energy += energy_pqeq
 
@@ -411,9 +463,9 @@ class MACEPQEQ(ScaleShiftMACE):
             compute_edge_forces=compute_edge_forces,
         )
         if not torch.isnan(pqeq_result['forces']).any():
-            forces += pqeq_result['forces']
+            forces += pqeq_result['forces'] * head_mask[data["batch"]].unsqueeze(-1)
             if stress is not None:
-                stress += pqeq_result['stress']
+                stress += pqeq_result['stress'] * head_mask.view(-1, 1, 1)
 
         # Add Coulomb term to forces and stress 
         atomic_virials: Optional[torch.Tensor] = None
