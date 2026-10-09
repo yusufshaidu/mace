@@ -146,28 +146,28 @@ def test_run_train(tmp_path, fitting_configs):
 
     print("Es", Es)
     ref_Es = [
-        0.6020793433333951,
-        -0.04897875436345805,
-        0.5105856021772198,
-        0.46533330254596983,
-        0.5930650715827769,
-        0.4550156347621205,
-        0.401680205241765,
-        0.5653813933989743,
-        0.5029856165753587,
-        0.3757482381662212,
-        0.6276906636632577,
-        0.4083639152204791,
-        0.4706426422216971,
-        0.4925230371485189,
-        0.44705004540840837,
-        0.33613012354948674,
-        0.5290351943665962,
-        0.47394776659687043,
-        0.4043022325669644,
-        0.3020163432834793,
-        0.44960464855404125,
-        0.37537264290874556,
+        0.6001536369637954,
+        -0.04838472166171834,
+        0.5100248921875328,
+        0.4646980826445392,
+        0.5924359820276432,
+        0.4543421444506531,
+        0.40095077657929584,
+        0.5648158602606899,
+        0.5024195091328344,
+        0.3750166541267058,
+        0.6269329149464453,
+        0.40759396164173173,
+        0.4700627199087948,
+        0.49190238188903973,
+        0.4463665549544218,
+        0.3353615037627895,
+        0.5284285477157606,
+        0.47329956528126566,
+        0.40359413811333594,
+        0.3015089992094603,
+        0.4491424320858331,
+        0.37462898440463105,
     ]
     assert np.allclose(Es, ref_Es)
 
@@ -646,3 +646,23 @@ def test_pqeq_heads_selection():
     assert _pqeq_heads(Namespace(pqeq_heads="pt_head, Default"), heads, {}) == heads
     with pytest.raises(ValueError, match="unknown heads"):
         _pqeq_heads(Namespace(pqeq_heads="water"), heads)
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+@pytest.mark.parametrize("activation", ["tanh", "sigmoid", "softplus", "relu"])
+def test_sigma_readout_starts_at_zero_and_learns(fitting_configs, activation):
+    with default_dtype(torch.float64):
+        model = MACEPQEQ(
+            pqeq=True,
+            pqeq_arguments={
+                "environment_dependent_gaussian_width": True,
+                "gaussian_width_activation": activation,
+            },
+            **MODEL_CONFIG,
+        )
+        last = [_last_layer(readout) for readout in model.pqeq_sigma_readouts]
+        for layer in last:
+            assert torch.count_nonzero(layer.weight) == 0
+        out = model(_head_batch(model, fitting_configs, ["Default"], ["Default"]), training=True)
+        out["energy"].sum().backward()
+    assert sum(layer.weight.grad.abs().sum() for layer in last) > 0

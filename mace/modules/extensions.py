@@ -197,6 +197,8 @@ class MACEPQEQ(ScaleShiftMACE):
                 self.pqeq_sigma_readouts.append(
                     _copy_mace_readout(readout, cueq_config=cueq_config)
                 )
+        if self.environment_dependent_gaussian_width:
+            self.zero_pqeq_readouts(["pqeq_sigma_readouts"])
 
     @torch.jit.unused
     def pqeq_readout_names(self) -> List[str]:
