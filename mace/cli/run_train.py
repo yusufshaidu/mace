@@ -77,6 +77,42 @@ from mace.tools.tables_utils import create_error_table
 from mace.tools.utils import AtomicNumberTable
 
 
+CHARGE_PRIOR_KEYS = (
+    "charge_prior_weight",
+    "charge_prior_weight_final",
+    "charge_prior_scale",
+    "charge_prior_nonmain_penalty",
+    "charge_prior_temperature",
+    "charge_prior_temperature_final",
+    "charge_prior_decay_epochs",
+    "charge_prior_candidates",
+)
+
+
+def resolve_charge_prior_settings(args, model):
+    """Charge-prior settings from --pqeq_arguments (via the model's pqeq_config) or the command line.
+
+    A key set in --pqeq_arguments is used; otherwise the command-line value is. Setting a key both ways to
+    different values is an error.
+    """
+    parser = tools.build_default_arg_parser()
+    pqeq_config = getattr(model, "pqeq_config", None) or {}
+    settings = {}
+    for key in CHARGE_PRIOR_KEYS:
+        cli_value = getattr(args, key, parser.get_default(key))
+        if key in pqeq_config:
+            value = pqeq_config[key]
+            if cli_value != parser.get_default(key) and cli_value != value:
+                raise ValueError(
+                    f"{key} is set to {cli_value} on the command line and to {value} in --pqeq_arguments"
+                )
+            settings[key] = value
+        else:
+            settings[key] = cli_value
+    settings["charge_prior_weight"] = float(settings["charge_prior_weight"] or 0.0)
+    return settings
+
+
 def main() -> None:
     """
     This script runs the training/fine tuning for mace
@@ -841,6 +877,35 @@ def run(args) -> None:
     swas = [False]
     if args.swa:
         swa, swas = get_swa(args, model, optimizer, swas, dipole_only)
+
+    charge_prior = resolve_charge_prior_settings(args, model)
+    if charge_prior["charge_prior_weight"] > 0.0:
+        if not hasattr(model, "pqeq_model"):
+            raise ValueError("The charge prior needs a model that predicts charges (MACEPQEQ)")
+        from bacenet.models.charge_prior import check_prior_solver, check_reference_charges
+        from mace.modules.extensions import ChargePriorLoss
+
+        check_reference_charges(model.pqeq_model.estimate_species_q0(list(z_table.zs)))
+        check_prior_solver(model.pqeq_model.model.exact_solver, model.pqeq_model.model.pbc)
+
+        def _with_charge_prior(base):
+            return ChargePriorLoss(
+                base,
+                z_table.zs,
+                weight=charge_prior["charge_prior_weight"],
+                weight_final=charge_prior["charge_prior_weight_final"],
+                scale=charge_prior["charge_prior_scale"],
+                nonmain_penalty=charge_prior["charge_prior_nonmain_penalty"],
+                temperature=charge_prior["charge_prior_temperature"],
+                temperature_final=charge_prior["charge_prior_temperature_final"],
+                decay_epochs=charge_prior["charge_prior_decay_epochs"],
+                max_candidates=charge_prior["charge_prior_candidates"],
+            ).to(device)
+
+        loss_fn = _with_charge_prior(loss_fn)
+        if swa is not None:
+            swa.loss_fn = _with_charge_prior(swa.loss_fn)
+        logging.info(f"Charge prior enabled: {loss_fn}")
 
     checkpoint_handler = tools.CheckpointHandler(
         directory=args.checkpoints_dir,

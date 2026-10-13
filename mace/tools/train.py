@@ -225,6 +225,8 @@ def train(
                 swa.scheduler.step()
 
         # Train
+        if hasattr(loss_fn, "set_epoch"):
+            loss_fn.set_epoch(epoch)
         if distributed:
             train_sampler.set_epoch(epoch)
         if "ScheduleFree" in type(optimizer).__name__:

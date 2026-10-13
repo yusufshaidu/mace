@@ -1,3 +1,4 @@
+import math
 import importlib.util
 from pathlib import Path
 
@@ -146,28 +147,28 @@ def test_run_train(tmp_path, fitting_configs):
 
     print("Es", Es)
     ref_Es = [
-        0.6001536369637954,
-        -0.04838472166171834,
-        0.5100248921875328,
-        0.4646980826445392,
-        0.5924359820276432,
-        0.4543421444506531,
-        0.40095077657929584,
-        0.5648158602606899,
-        0.5024195091328344,
-        0.3750166541267058,
-        0.6269329149464453,
-        0.40759396164173173,
-        0.4700627199087948,
-        0.49190238188903973,
-        0.4463665549544218,
-        0.3353615037627895,
-        0.5284285477157606,
-        0.47329956528126566,
-        0.40359413811333594,
-        0.3015089992094603,
-        0.4491424320858331,
-        0.37462898440463105,
+        0.6060475029766712,
+        -0.052749521495003504,
+        0.5070719259431999,
+        0.46189143127896787,
+        0.5902770650590669,
+        0.4514416741820198,
+        0.39827530822714796,
+        0.5631236741856696,
+        0.4994541009246779,
+        0.3722971679946786,
+        0.6246452626783902,
+        0.40486020764571823,
+        0.46728016778530806,
+        0.4891797819227403,
+        0.44344220898861836,
+        0.3326136489539917,
+        0.5253753245018001,
+        0.4703623534446811,
+        0.40089359240297934,
+        0.29859704726145814,
+        0.44608910287054576,
+        0.37184892455631025,
     ]
     assert np.allclose(Es, ref_Es)
 
@@ -666,3 +667,317 @@ def test_sigma_readout_starts_at_zero_and_learns(fitting_configs, activation):
         out = model(_head_batch(model, fitting_configs, ["Default"], ["Default"]), training=True)
         out["energy"].sum().backward()
     assert sum(layer.weight.grad.abs().sum() for layer in last) > 0
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+@pytest.mark.parametrize("env", [False, True])
+def test_uniform_gaussian_width_reference_starts_every_species_equal(fitting_configs, env):
+    with default_dtype(torch.float64):
+        model = MACEPQEQ(
+            pqeq=True,
+            pqeq_arguments={
+                "environment_dependent_gaussian_width": env,
+                "gaussian_width_reference": 0.5,
+                "gaussian_width_activation": "sigmoid",
+                "gaussian_width_start": 0.5,
+                "gaussian_width_tanh_scale": 1.0,
+            },
+            **MODEL_CONFIG,
+        )
+        assert model.pqeq_config["gaussian_width_reference"] == 0.5
+        out = model(_head_batch(model, fitting_configs, ["Default"], ["Default"]), training=True)
+    widths = out["gaussian_width"]
+    torch.testing.assert_close(widths, torch.full_like(widths, math.sqrt(2.0) * 0.75))
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_charge_prior_loss_adds_weighted_prior(fitting_configs):
+    from bacenet.models.charge_prior import charge_prior_loss
+    from mace.modules import WeightedEnergyForcesLoss
+    from mace.modules.extensions import ChargePriorLoss
+
+    with default_dtype(torch.float64):
+        model = MACEPQEQ(pqeq=True, **MODEL_CONFIG)
+        _randomize(model)
+        periodic = [c for c in fitting_configs if c.pbc.any()][:3]
+        configs = []
+        for atoms in periodic:
+            cfg = data.config_from_atoms(
+                atoms, key_specification=data.KeySpecification(
+                    info_keys={"energy": "REF_energy"}, arrays_keys={"forces": "REF_forces"}
+                )
+            )
+            configs.append(cfg)
+        z_table = utils.AtomicNumberTable([1, 8])
+        loader = torch_geometric.dataloader.DataLoader(
+            dataset=[data.AtomicData.from_config(c, z_table=z_table, cutoff=float(model.r_max)) for c in configs],
+            batch_size=3,
+            shuffle=False,
+        )
+        batch = next(iter(loader))
+        pred = model(batch.to_dict(), training=True)
+        base = WeightedEnergyForcesLoss(energy_weight=1.0, forces_weight=1.0)
+        loss_fn = ChargePriorLoss(base, [1, 8], weight=2.0, decay_epochs=10)
+        expected_prior = charge_prior_loss(
+            pred["charges"].reshape(-1),
+            torch.tensor([1, 8])[batch["node_attrs"].argmax(dim=-1)],
+            batch["batch"],
+            batch["total_charge"].reshape(-1),
+            scale=0.6,
+            temperature=0.1,
+            nonmain_penalty=4.0,
+        )
+        total = loss_fn(ref=batch, pred=pred)
+        torch.testing.assert_close(total, base(ref=batch, pred=pred) + 2.0 * expected_prior)
+        assert expected_prior.item() > 0.0
+
+        loss_fn.set_epoch(10)
+        weight, temperature = loss_fn.current_weight_and_temperature()
+        assert weight == pytest.approx(0.2)
+        assert temperature == pytest.approx(0.01)
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+@pytest.mark.parametrize("source", ["command_line", "pqeq_arguments"])
+def test_run_train_with_charge_prior(tmp_path, fitting_configs, monkeypatch, source):
+    from mace.modules import extensions
+
+    calls = {"n": 0, "epochs": set()}
+    original = extensions.ChargePriorLoss.prior
+
+    def counting_prior(self, ref, pred):
+        calls["n"] += 1
+        calls["epochs"].add(self.epoch)
+        return original(self, ref, pred)
+
+    monkeypatch.setattr(extensions.ChargePriorLoss, "prior", counting_prior)
+    ase.io.write(tmp_path / "fit.xyz", fitting_configs)
+    params = _mace_params.copy()
+    params.update(
+        checkpoints_dir=str(tmp_path),
+        model_dir=str(tmp_path),
+        train_file=tmp_path / "fit.xyz",
+        max_num_epochs=2,
+    )
+    if source == "command_line":
+        params["charge_prior_weight"] = 1.0
+    else:
+        params["pqeq_arguments"] = "{'charge_prior_weight': 1.0, 'charge_prior_scale': 0.7}"
+    args = build_default_arg_parser().parse_args(
+        [f"--{k}={v}" if v is not None else f"--{k}" for k, v in params.items()]
+    )
+    mace_run(args)
+    assert calls["n"] > 0
+    assert calls["epochs"] == {0, 1}
+    assert (tmp_path / "MACE.model").exists()
+
+
+
+def test_resolve_charge_prior_settings():
+    from argparse import Namespace
+
+    from mace.cli.run_train import CHARGE_PRIOR_KEYS, resolve_charge_prior_settings
+    from mace.tools.arg_parser import build_default_arg_parser
+
+    parser = build_default_arg_parser()
+    defaults = {key: parser.get_default(key) for key in CHARGE_PRIOR_KEYS}
+    model = Namespace(pqeq_config={"charge_prior_weight": 2.0, "charge_prior_scale": 0.7})
+
+    settings = resolve_charge_prior_settings(Namespace(**defaults), model)
+    assert settings["charge_prior_weight"] == 2.0
+    assert settings["charge_prior_scale"] == 0.7
+    assert settings["charge_prior_temperature"] == defaults["charge_prior_temperature"]
+
+    cli = Namespace(**{**defaults, "charge_prior_weight": 3.0})
+    assert resolve_charge_prior_settings(cli, Namespace(pqeq_config={}))["charge_prior_weight"] == 3.0
+    with pytest.raises(ValueError, match="charge_prior_weight"):
+        resolve_charge_prior_settings(cli, model)
+    same = Namespace(**{**defaults, "charge_prior_weight": 2.0})
+    assert resolve_charge_prior_settings(same, model)["charge_prior_weight"] == 2.0
+    assert resolve_charge_prior_settings(Namespace(**defaults), Namespace())["charge_prior_weight"] == 0.0
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_run_train_charge_prior_needs_zero_q0(tmp_path, fitting_configs):
+    ase.io.write(tmp_path / "fit.xyz", fitting_configs)
+    params = _mace_params.copy()
+    params.update(
+        checkpoints_dir=str(tmp_path),
+        model_dir=str(tmp_path),
+        train_file=tmp_path / "fit.xyz",
+        max_num_epochs=1,
+        pqeq_arguments="{'charge_prior_weight': 1.0, 'oxidation_states': {'O': -2.0}}",
+    )
+    args = build_default_arg_parser().parse_args(
+        [f"--{k}={v}" if v is not None else f"--{k}" for k, v in params.items()]
+    )
+    with pytest.raises(ValueError, match="zero reference charges"):
+        mace_run(args)
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+@pytest.mark.parametrize("analytic", [True, False])
+@pytest.mark.parametrize("shell_vector", [False, True])
+@pytest.mark.parametrize("stiffness,activation", [("softplus", "sigmoid"), ("polarizability", "sigmoid"),
+                                                 ("polarizability", "softplus")])
+def test_charge_response_gradients_match_finite_differences(fitting_configs, analytic, shell_vector, stiffness,
+                                                            activation):
+    with default_dtype(torch.float64):
+        model = MACEPQEQ(pqeq=True, pqeq_arguments={"analytic_ewald_derivative": analytic,
+                                                    "exact_solver": True,
+                                                    "shell_vector_term": shell_vector,
+                                                    "shell_stiffness_mode": stiffness,
+                                                    "polarizability_activation": activation},
+                         **FINETUNE_CONFIG)
+        _randomize(model)
+        atoms = [c for c in fitting_configs if c.pbc.any()][0]
+        cfg = data.config_from_atoms(
+            atoms, key_specification=data.KeySpecification(
+                info_keys={"energy": "REF_energy"}, arrays_keys={"forces": "REF_forces"}
+            )
+        )
+        z_table = utils.AtomicNumberTable([1, 8])
+        batch = next(iter(torch_geometric.dataloader.DataLoader(
+            dataset=[data.AtomicData.from_config(cfg, z_table=z_table, cutoff=float(model.r_max))],
+            batch_size=1,
+        ))).to_dict()
+        observables = {
+            "forces": lambda o: o["forces"].square().sum(),
+            "stress": lambda o: o["stress"].square().sum(),
+            "energy": lambda o: o["energy"].sum(),
+            "charges": lambda o: (o["charges"] * torch.arange(o["charges"].numel())).sum(),
+            "shells": lambda o: o["shell_disp"].square().sum(),
+        }
+
+        def run():
+            return model({k: v.clone() if torch.is_tensor(v) else v for k, v in batch.items()},
+                         training=True, compute_stress=True)
+
+        names = ["pqeq_e1_readouts", "pqeq_e2_readouts", "pqeq_e2d_readouts"]
+        if shell_vector:
+            names.append("pqeq_ed1_readouts")
+        for name in names:
+            param = _last_layer(getattr(model, name)[-1]).weight
+            direction = torch.randn(param.shape, generator=torch.Generator().manual_seed(1))
+            out = run()
+            grads = {k: (torch.autograd.grad(f(out), param, retain_graph=True)[0] * direction).sum().item()
+                     for k, f in observables.items()}
+            h = 1e-4
+            with torch.no_grad():
+                param.add_(h * direction)
+            plus = run()
+            with torch.no_grad():
+                param.sub_(2 * h * direction)
+            minus = run()
+            with torch.no_grad():
+                param.add_(h * direction)
+            for key, f in observables.items():
+                fd = (f(plus) - f(minus)).item() / (2 * h)
+                assert grads[key] == pytest.approx(fd, rel=1e-4, abs=1e-9), (name, key)
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_run_train_charge_prior_needs_exact_solver(tmp_path, fitting_configs):
+    ase.io.write(tmp_path / "fit.xyz", fitting_configs)
+    params = _mace_params.copy()
+    params.update(
+        checkpoints_dir=str(tmp_path),
+        model_dir=str(tmp_path),
+        train_file=tmp_path / "fit.xyz",
+        max_num_epochs=1,
+        pqeq_arguments="{'charge_prior_weight': 1.0, 'exact_solver': False}",
+    )
+    args = build_default_arg_parser().parse_args(
+        [f"--{k}={v}" if v is not None else f"--{k}" for k, v in params.items()]
+    )
+    with pytest.raises(ValueError, match="exact_solver"):
+        mace_run(args)
+
+
+def _single_batch(model, atoms):
+    cfg = data.config_from_atoms(atoms)
+    z_table = utils.AtomicNumberTable([int(z) for z in model.atomic_numbers])
+    return next(iter(torch_geometric.dataloader.DataLoader(
+        dataset=[data.AtomicData.from_config(cfg, z_table=z_table, cutoff=float(model.r_max))],
+        batch_size=1,
+    ))).to_dict()
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_polarizability_stiffness_starts_at_the_free_atom_value(fitting_configs):
+    from bacenet.functions import species_priors
+    from bacenet.models.compute_torch import CONV_FACT
+
+    with default_dtype(torch.float64):
+        model = MACEPQEQ(pqeq=True, pqeq_arguments={"shell_stiffness_mode": "polarizability",
+                                                    "wannier_centriod_mode": True},
+                         **FINETUNE_CONFIG)
+        assert model.pqeq_config["shell_stiffness_mode"] == "polarizability"
+        assert model.pqeq_config["polarizability_scale_max"] == 2.0
+        assert model.pqeq_config["polarizability_activation"] == "sigmoid"
+        model.zero_pqeq_readouts()
+        atoms = [c for c in fitting_configs if c.pbc.any()][0]
+        out = model(_single_batch(model, atoms), compute_stress=True)
+    numbers = atoms.get_atomic_numbers().tolist()
+    zin = model.pqeq_model.estimate_species_nelectrons(numbers, 1).double()
+    alpha = species_priors.estimate_species_polarizability(numbers).double()
+    expected = CONV_FACT * zin * zin / alpha
+    torch.testing.assert_close(out["E_d2"].reshape(len(numbers), 3), expected[:, None].expand(-1, 3))
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_shell_vector_term_starts_at_zero(fitting_configs):
+    with default_dtype(torch.float64):
+        torch.manual_seed(0)
+        on = MACEPQEQ(pqeq=True, pqeq_arguments={"shell_vector_term": True}, **FINETUNE_CONFIG)
+        torch.manual_seed(0)
+        off = MACEPQEQ(pqeq=True, **FINETUNE_CONFIG)
+        atoms = [c for c in fitting_configs if c.pbc.any()][0]
+        a = on(_single_batch(on, atoms), compute_stress=True)
+        b = off(_single_batch(off, atoms), compute_stress=True)
+        assert torch.count_nonzero(a["E_d1"]) == 0
+        assert b["E_d1"] is None
+        for key in ("energy", "forces", "stress", "charges", "shell_disp"):
+            torch.testing.assert_close(a[key], b[key])
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_shell_vector_term_needs_vector_features():
+    config = {**FINETUNE_CONFIG, "hidden_irreps": o3.Irreps("32x0e"), "max_ell": 1}
+    with pytest.raises(ValueError, match="l=1"):
+        MACEPQEQ(pqeq=True, pqeq_arguments={"shell_vector_term": True}, **config)
+    with pytest.raises(ValueError, match="pqeq"):
+        MACEPQEQ(pqeq=False, pqeq_arguments={"shell_vector_term": True}, **FINETUNE_CONFIG)
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+@pytest.mark.parametrize("analytic", [True, False])
+def test_shell_vector_term_is_equivariant_and_conservative(fitting_configs, analytic):
+    with default_dtype(torch.float64):
+        model = MACEPQEQ(pqeq=True, pqeq_arguments={"analytic_ewald_derivative": analytic,
+                                                    "shell_vector_term": True},
+                         **FINETUNE_CONFIG)
+        _randomize(model)
+        atoms = [c for c in fitting_configs if c.pbc.any()][0].copy()
+        torch.manual_seed(3)
+        R = o3.rand_matrix().double()
+        rotated = atoms.copy()
+        rotated.set_cell(atoms.cell.array @ R.numpy().T, scale_atoms=False)
+        rotated.positions = atoms.positions @ R.numpy().T
+        a = model(_single_batch(model, atoms), compute_stress=True)
+        b = model(_single_batch(model, rotated), compute_stress=True)
+        assert a["E_d1"].abs().max() > 1e-5
+        torch.testing.assert_close(b["energy"], a["energy"], rtol=1e-6, atol=1e-6)
+        torch.testing.assert_close(b["E_d1"], a["E_d1"] @ R.T, rtol=1e-6, atol=1e-6)
+        torch.testing.assert_close(b["shell_disp"].reshape(-1, 3), a["shell_disp"].reshape(-1, 3) @ R.T,
+                                   rtol=1e-6, atol=1e-6)
+        torch.testing.assert_close(b["forces"], a["forces"] @ R.T, rtol=1e-6, atol=1e-6)
+
+        h = 1e-5
+        for atom, axis in ((0, 0), (1, 2), (2, 1)):
+            plus, minus = atoms.copy(), atoms.copy()
+            plus.positions[atom, axis] += h
+            minus.positions[atom, axis] -= h
+            fd = -(model(_single_batch(model, plus))["energy"]
+                   - model(_single_batch(model, minus))["energy"]).item() / (2 * h)
+            assert a["forces"][atom, axis].item() == pytest.approx(fd, rel=1e-5, abs=1e-7)

@@ -68,6 +68,14 @@ def _copy_mace_readout(
     raise TypeError("Unsupported readout type.")
 
 
+def _get_readout_irreps_in(block: torch.nn.Module) -> o3.Irreps:
+    if isinstance(block, LinearReadoutBlock):
+        return o3.Irreps(block.linear.irreps_in)  # type: ignore
+    if isinstance(block, NonLinearReadoutBlock):  # type: ignore
+        return o3.Irreps(block.linear_1.irreps_in)  # type: ignore
+    raise TypeError("Unsupported readout type for input irreps retrieval.")
+
+
 def _get_readout_input_dim(block: torch.nn.Module) -> int:
     if isinstance(block, LinearReadoutBlock):
         return block.linear.irreps_in.dim  # type: ignore
@@ -199,6 +207,30 @@ class MACEPQEQ(ScaleShiftMACE):
                 )
         if self.environment_dependent_gaussian_width:
             self.zero_pqeq_readouts(["pqeq_sigma_readouts"])
+
+        self.shell_vector_term = bool(bacenet_configs.get('shell_vector_term', False))
+        self.pqeq_ed1_layers: List[int] = []
+        if self.shell_vector_term:
+            if not self.pqeq:
+                raise ValueError("shell_vector_term needs pqeq: true")
+            self.pqeq_ed1_readouts = torch.nn.ModuleList()
+            for i, readout in enumerate(self.readouts):  # type: ignore
+                irreps_in = _get_readout_irreps_in(readout)
+                if o3.Irrep("1o") not in irreps_in:
+                    continue
+                self.pqeq_ed1_layers.append(i)
+                self.pqeq_ed1_readouts.append(
+                    LinearReadoutBlock(
+                        irreps_in=irreps_in,
+                        irrep_out=o3.Irreps(f"{self.n_shells}x1o"),
+                        cueq_config=cueq_config,
+                    )
+                )
+            if not self.pqeq_ed1_layers:
+                raise ValueError(
+                    "shell_vector_term needs l=1 node features in at least one readout; use max_L >= 1"
+                )
+            self.zero_pqeq_readouts(["pqeq_ed1_readouts"])
 
     @torch.jit.unused
     def pqeq_readout_names(self) -> List[str]:
@@ -332,6 +364,7 @@ class MACEPQEQ(ScaleShiftMACE):
         node_e2s_list: List[torch.Tensor] = []
         node_e2ds_list: List[torch.Tensor] = []
         node_sigmas_list: List[torch.Tensor] = []
+        node_ed1s_list: List[torch.Tensor] = []
 
         for i, (interaction, product) in enumerate(
             zip(self.interactions, self.products)
@@ -386,6 +419,12 @@ class MACEPQEQ(ScaleShiftMACE):
                 )[num_atoms_arange, node_heads]
                 node_sigmas_list.append(node_sigmas)
 
+        if hasattr(self, "pqeq_ed1_readouts"):
+            for k, ed1_readout in enumerate(self.pqeq_ed1_readouts):
+                layer = self.pqeq_ed1_layers[k]
+                feat_idx = -1 if len(self.readouts) == 1 else layer
+                node_ed1s_list.append(ed1_readout(node_feats_list[feat_idx], node_heads))
+
         node_feats_out = torch.cat(node_feats_list, dim=-1)
         node_inter_es = torch.sum(torch.stack(node_es_list, dim=0), dim=0)
         node_inter_es = self.scale_shift(node_inter_es, node_heads)
@@ -425,6 +464,10 @@ class MACEPQEQ(ScaleShiftMACE):
             pqeq_data["env_sigma"] = torch.sum(
                 torch.stack(node_sigmas_list, dim=1), dim=1
             )
+        e_d1_pqeq: Optional[torch.Tensor] = None
+        if hasattr(self, "pqeq_ed1_readouts"):
+            e_d1_pqeq = torch.sum(torch.stack(node_ed1s_list, dim=0), dim=0)
+            pqeq_data["E_d1"] = e_d1_pqeq
 
         pqeq_result = self.pqeq_model(pqeq_data)
 
@@ -443,11 +486,7 @@ class MACEPQEQ(ScaleShiftMACE):
         energy_pqeq = energy_pqeq_local + energy_pqeq_ewald_field
         total_energy += energy_pqeq
 
-        if torch.isnan(pqeq_result['forces']).any():
-            _total_energy = inter_e + energy_pqeq
-        else:
-            _total_energy = inter_e + energy_pqeq_local
-
+        _total_energy = inter_e + energy_pqeq
 
         forces, virials, stress, hessian, edge_forces = get_outputs(
             energy=_total_energy, # using this we can obtian
@@ -498,6 +537,7 @@ class MACEPQEQ(ScaleShiftMACE):
             "E1": pqeq_result['E1'],
             "E2": pqeq_result['E2'],
             "E_d2": pqeq_result['E_d2'],
+            "E_d1": e_d1_pqeq,
             "gaussian_width": pqeq_result['gaussian_width'],
         }
 
@@ -1412,3 +1452,84 @@ class PolarMACE(ScaleShiftMACE):
             "electrostatic_potentials": esps,
             "spin_charge_density": spin_charge_density_mul_ir,
         }
+
+
+class ChargePriorLoss(torch.nn.Module):
+    """Adds the oxidation-state prior on predicted charges (bacenet.models.charge_prior) to a MACE loss.
+
+    The weight and the soft-min temperature decay geometrically from their start to their final values over
+    decay_epochs; the training loop sets the epoch through set_epoch.
+    """
+
+    def __init__(
+        self,
+        base_loss: torch.nn.Module,
+        atomic_numbers,
+        weight: float,
+        weight_final: Optional[float] = None,
+        scale: float = 0.6,
+        nonmain_penalty: float = 4.0,
+        temperature: float = 0.1,
+        temperature_final: float = 0.01,
+        decay_epochs: int = 100,
+        max_candidates: int = 20,
+    ):
+        super().__init__()
+        self.base_loss = base_loss
+        self.register_buffer(
+            "atomic_numbers", torch.as_tensor(list(atomic_numbers), dtype=torch.long)
+        )
+        self.weight = float(weight)
+        self.weight_final = 0.1 * self.weight if weight_final is None else float(weight_final)
+        self.scale = float(scale)
+        self.nonmain_penalty = float(nonmain_penalty)
+        self.temperature = float(temperature)
+        self.temperature_final = float(temperature_final)
+        self.decay_epochs = int(decay_epochs)
+        self.max_candidates = int(max_candidates)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def current_weight_and_temperature(self):
+        from bacenet.models.charge_prior import geometric_schedule
+
+        weight = geometric_schedule(self.epoch, self.decay_epochs, self.weight, self.weight_final)
+        temperature = geometric_schedule(
+            self.epoch, self.decay_epochs, self.temperature, self.temperature_final
+        )
+        return weight, temperature
+
+    def prior(self, ref, pred) -> torch.Tensor:
+        from bacenet.models.charge_prior import charge_prior_loss
+
+        charges = pred["charges"].reshape(-1)
+        _, temperature = self.current_weight_and_temperature()
+        atomic_numbers = self.atomic_numbers.to(charges.device)[ref["node_attrs"].argmax(dim=-1)]
+        return charge_prior_loss(
+            charges,
+            atomic_numbers,
+            ref["batch"],
+            ref["total_charge"].reshape(-1),
+            scale=self.scale,
+            temperature=temperature,
+            nonmain_penalty=self.nonmain_penalty,
+            max_candidates=self.max_candidates,
+        )
+
+    def forward(self, ref, pred, ddp: Optional[bool] = None) -> torch.Tensor:
+        loss = self.base_loss(ref=ref, pred=pred, ddp=ddp)
+        if pred.get("charges") is None:
+            return loss
+        weight, _ = self.current_weight_and_temperature()
+        return loss + weight * self.prior(ref, pred)
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(base={self.base_loss!r}, weight={self.weight}, "
+            f"weight_final={self.weight_final}, scale={self.scale}, "
+            f"nonmain_penalty={self.nonmain_penalty}, temperature={self.temperature}, "
+            f"temperature_final={self.temperature_final}, decay_epochs={self.decay_epochs}, "
+            f"max_candidates={self.max_candidates})"
+        )

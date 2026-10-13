@@ -1130,6 +1130,54 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         required=False,
     )
     parser.add_argument(
+        "--charge_prior_weight",
+        help="Weight of the oxidation-state prior on predicted charges; the prior is on when this is above 0",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--charge_prior_weight_final",
+        help="Weight after decay (default: 10%% of --charge_prior_weight)",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
+        "--charge_prior_scale",
+        help="Factor alpha that turns oxidation states into nominal charges",
+        type=float,
+        default=0.6,
+    )
+    parser.add_argument(
+        "--charge_prior_nonmain_penalty",
+        help="Log-probability penalty kappa for each atom in a non-main oxidation state",
+        type=float,
+        default=4.0,
+    )
+    parser.add_argument(
+        "--charge_prior_temperature",
+        help="Starting temperature tau of the soft minimum over candidates, in e^2",
+        type=float,
+        default=0.1,
+    )
+    parser.add_argument(
+        "--charge_prior_temperature_final",
+        help="Temperature after decay, in e^2",
+        type=float,
+        default=0.01,
+    )
+    parser.add_argument(
+        "--charge_prior_decay_epochs",
+        help="Epochs over which weight and temperature decay geometrically to their final values",
+        type=int,
+        default=100,
+    )
+    parser.add_argument(
+        "--charge_prior_candidates",
+        help="Charge-neutral oxidation-state assignments kept per composition",
+        type=int,
+        default=20,
+    )
+    parser.add_argument(
         "--pqeq_head_init",
         help="Initialization of PQEQ readouts the foundation model does not have: "
         "'zero' zeroes their last layer so the electrostatic parameters start at the "
