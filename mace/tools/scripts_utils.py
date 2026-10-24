@@ -34,7 +34,7 @@ class SubsetCollection:
 def log_dataset_contents(dataset: data.Configurations, dataset_name: str) -> None:
     log_string = f"{dataset_name} ["
     for prop_name in dataset[0].properties.keys():
-        if prop_name == "dipole":
+        if prop_name in ("dipole", "polarization"):
             log_string += f"{prop_name} components: {int(np.sum([np.sum(config.property_weights[prop_name]) for config in dataset]))}, "
         else:
             log_string += f"{prop_name}: {int(np.sum([config.property_weights[prop_name] for config in dataset]))}, "
@@ -671,6 +671,7 @@ def get_loss_fn(
     args: argparse.Namespace,
     dipole_only: bool,
     compute_dipole: bool,
+    compute_polarization: bool = False,
 ) -> torch.nn.Module:
     if args.loss == "weighted":
         loss_fn = modules.WeightedEnergyForcesLoss(
@@ -727,6 +728,27 @@ def get_loss_fn(
             energy_weight=args.energy_weight,
             forces_weight=args.forces_weight,
             dipole_weight=args.dipole_weight,
+        )
+    elif args.loss == "polarization":
+        assert compute_polarization, (
+            "polarization loss requires a model that outputs 'polarization' "
+            "(MACEPQEQ with pqeq=True and pqeq_arguments.polarization_mode set)"
+        )
+        loss_fn = modules.PolarizationSingleLoss(
+            polarization_weight=args.polarization_weight,
+            polarization_loss_scale=args.polarization_loss_scale,
+        )
+    elif args.loss == "energy_forces_polarization":
+        assert compute_polarization, (
+            "energy_forces_polarization loss requires a model that outputs "
+            "'polarization' (MACEPQEQ with pqeq=True and "
+            "pqeq_arguments.polarization_mode set)"
+        )
+        loss_fn = modules.WeightedEnergyForcesPolarizationLoss(
+            energy_weight=args.energy_weight,
+            forces_weight=args.forces_weight,
+            polarization_weight=args.polarization_weight,
+            polarization_loss_scale=args.polarization_loss_scale,
         )
     else:
         loss_fn = modules.WeightedEnergyForcesLoss(energy_weight=1.0, forces_weight=1.0)
@@ -796,6 +818,16 @@ def get_swa(
         )
         logging.info(
             f"Stage Two (after {args.start_swa} epochs) with loss function: {loss_fn_energy}, with energy weight : {args.swa_energy_weight}, forces weight : {args.swa_forces_weight}, stress weight : {args.swa_stress_weight} and learning rate : {args.swa_lr}"
+        )
+    elif args.loss == "energy_forces_polarization":
+        loss_fn_energy = modules.WeightedEnergyForcesPolarizationLoss(
+            energy_weight=args.swa_energy_weight,
+            forces_weight=args.swa_forces_weight,
+            polarization_weight=args.swa_polarization_weight,
+            polarization_loss_scale=args.polarization_loss_scale,
+        )
+        logging.info(
+            f"Stage Two (after {args.start_swa} epochs) with loss function: {loss_fn_energy}, with energy weight : {args.swa_energy_weight}, forces weight : {args.swa_forces_weight}, polarization weight : {args.swa_polarization_weight} and learning rate : {args.swa_lr}"
         )
     else:
         loss_fn_energy = modules.WeightedEnergyForcesLoss(
