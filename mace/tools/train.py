@@ -144,6 +144,13 @@ def valid_err_log(
         logging.info(
             f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, RMSE_E_per_atom={error_e:8.2f} meV, RMSE_F={error_f:8.2f} meV / A, RMSE_Mu_per_atom={error_mu:8.2f} mDebye",
         )
+    elif log_errors == "EnergyForcesPolarizationRMSE":
+        error_e = eval_metrics["rmse_e_per_atom"] * 1e3
+        error_f = eval_metrics["rmse_f"] * 1e3
+        error_p = eval_metrics["rmse_polarization"] * 1e3
+        logging.info(
+            f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, RMSE_E_per_atom={error_e:8.2f} meV, RMSE_F={error_f:8.2f} meV / A, RMSE_P={error_p:8.4f} me / A^2",
+        )
 
 
 def train(
@@ -613,6 +620,9 @@ class MACELoss(Metric):
         self.add_state("mus", default=[], dist_reduce_fx="cat")
         self.add_state("delta_mus", default=[], dist_reduce_fx="cat")
         self.add_state("delta_mus_per_atom", default=[], dist_reduce_fx="cat")
+        self.add_state("Pol_computed", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("pols", default=[], dist_reduce_fx="cat")
+        self.add_state("delta_pols", default=[], dist_reduce_fx="cat")
         self.add_state(
             "polarizability_computed", default=torch.tensor(0.0), dist_reduce_fx="sum"
         )
@@ -670,6 +680,18 @@ class MACELoss(Metric):
                 self.delta_mus,
                 batch.weight,
                 batch.dipole_weight,
+                spread_quantity_vector=False,
+            )
+        if output.get("polarization") is not None and batch.polarization is not None:
+            self.pols.append(batch.polarization.view(-1, 3))
+            self.delta_pols.append(
+                batch.polarization.view(-1, 3) - output["polarization"].view(-1, 3)
+            )
+            self.Pol_computed += filter_nonzero_weight(
+                batch,
+                self.delta_pols,
+                batch.weight,
+                batch.polarization_weight,
                 spread_quantity_vector=False,
             )
         if (
@@ -752,6 +774,13 @@ class MACELoss(Metric):
             aux["rmse_mu_per_atom"] = compute_rmse(delta_mus_per_atom)
             aux["rel_rmse_mu"] = compute_rel_rmse(delta_mus, mus)
             aux["q95_mu"] = compute_q95(delta_mus)
+        if self.Pol_computed:
+            pols = self.convert(self.pols)
+            delta_pols = self.convert(self.delta_pols)
+            aux["mae_polarization"] = compute_mae(delta_pols)
+            aux["rmse_polarization"] = compute_rmse(delta_pols)
+            aux["rel_rmse_polarization"] = compute_rel_rmse(delta_pols, pols)
+            aux["q95_polarization"] = compute_q95(delta_pols)
         if self.polarizability_computed:
             delta_polarizability = self.convert(self.delta_polarizability)
             delta_polarizability_per_atom = self.convert(

@@ -617,6 +617,14 @@ def run(args) -> None:
             except KeyError as e:
                 raise KeyError(f"Atomic number {e} not found in atomic_energies_dict for head {head_config.head_name}, add E0s for this atomic number") from e
 
+    # MACEPQEQ's forward() unconditionally includes "polarization" in its output
+    # dict whenever pqeq=True (no separate compute_* kwarg needed on the model
+    # side) -- this flag only drives get_loss_fn's backward-compatibility assert,
+    # refusing the polarization loss choices for any other model.
+    args.compute_polarization = args.model == "MACEPQEQ" and getattr(
+        args, "pqeq", False
+    )
+
     # Load datasets for each head, supporting multiple files per head
     valid_sets = {head: [] for head in heads}
     train_sets = {head: [] for head in heads}
@@ -784,7 +792,9 @@ def run(args) -> None:
             generator=torch.Generator().manual_seed(args.seed),
         )
 
-    loss_fn = get_loss_fn(args, dipole_only, args.compute_dipole)
+    loss_fn = get_loss_fn(
+        args, dipole_only, args.compute_dipole, args.compute_polarization
+    )
     args.avg_num_neighbors = get_avg_num_neighbors(head_configs, args, train_loader, device)
 
     # Model

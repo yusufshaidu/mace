@@ -60,6 +60,12 @@ def parse_args() -> argparse.Namespace:
         default=False,
     )
     parser.add_argument(
+        "--compute_polarization",
+        help="compute total polarization (e/Angstrom^2, per configuration)",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
         "--return_contributions",
         help="model outputs energy contributions for each body order, only supported for MACE, not ScaleShiftMACE",
         action="store_true",
@@ -140,6 +146,8 @@ def run(args: argparse.Namespace) -> None:
     model = torch.load(f=args.model, map_location=args.device)
     if model.__class__.__name__ != "MACELES" and args.compute_bec:
         raise ValueError("BEC can only be computed with MACELES model. ")
+    if model.__class__.__name__ != "MACEPQEQ" and args.compute_polarization:
+        raise ValueError("polarization can only be computed with the MACEPQEQ model.")
     if args.enable_cueq:
         print("Converting models to CuEq for acceleration")
         model = run_e3nn_to_cueq(model, device=device)
@@ -188,6 +196,7 @@ def run(args: argparse.Namespace) -> None:
     stresses_list = []
     bec_list = []
     qs_list = []
+    polarizations_list = []
     forces_collection = []
 
     for batch in data_loader:
@@ -198,6 +207,8 @@ def run(args: argparse.Namespace) -> None:
         energies_list.append(torch_tools.to_numpy(output["energy"]))
         if args.compute_stress:
             stresses_list.append(torch_tools.to_numpy(output["stress"]))
+        if args.compute_polarization:
+            polarizations_list.append(torch_tools.to_numpy(output["polarization"]))
         if args.compute_bec:
             becs = np.split(
                 torch_tools.to_numpy(output["BEC"]),
@@ -277,6 +288,10 @@ def run(args: argparse.Namespace) -> None:
         stresses = np.concatenate(stresses_list, axis=0)
         assert len(atoms_list) == stresses.shape[0]
 
+    if args.compute_polarization:
+        polarizations = np.concatenate(polarizations_list, axis=0)
+        assert len(atoms_list) == polarizations.shape[0]
+
     if args.compute_bec:
         bec_list = [becs for sublist in bec_list for becs in sublist]
         qs_list = [qs for sublist in qs_list for qs in sublist]
@@ -301,6 +316,9 @@ def run(args: argparse.Namespace) -> None:
 
         if args.compute_stress:
             atoms.info[args.info_prefix + "stress"] = stresses[i]
+
+        if args.compute_polarization:
+            atoms.info[args.info_prefix + "polarization"] = polarizations[i]
 
         if args.compute_bec:
             atoms.arrays[args.info_prefix + "BEC"] = bec_list[i].reshape(-1, 9)

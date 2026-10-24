@@ -125,6 +125,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "DipoleMAE",
             "DipolePolarRMSE",
             "EnergyDipoleRMSE",
+            "EnergyForcesPolarizationRMSE",
         ],
         default="PerAtomRMSE",
     )
@@ -683,6 +684,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=DefaultKeys.DIPOLE.value,
     )
     parser.add_argument(
+        "--polarization_key",
+        help="Key of reference total polarization (e/Angstrom^2, per configuration) in training xyz",
+        type=str,
+        default=DefaultKeys.POLARIZATION.value,
+    )
+    parser.add_argument(
         "--polarizability_key",
         help="Key of polarizability in training xyz",
         type=str,
@@ -765,6 +772,8 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "universal",
             "energy_forces_dipole",
             "l1l2energyforces",
+            "polarization",
+            "energy_forces_polarization",
         ],
     )
     parser.add_argument(
@@ -821,6 +830,27 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         dest="swa_dipole_weight",
+    )
+    parser.add_argument(
+        "--polarization_weight", help="weight of polarization loss", type=float, default=1.0
+    )
+    parser.add_argument(
+        "--swa_polarization_weight",
+        "--stage_two_polarization_weight",
+        help="weight of polarization loss after starting Stage Two (previously called swa)",
+        type=float,
+        default=1.0,
+        dest="swa_polarization_weight",
+    )
+    parser.add_argument(
+        "--polarization_loss_scale",
+        help=(
+            "Multiplicative scale on the polarization MSE term (polarization is "
+            "O(0.03 e/Angstrom^2), so raw MSE is ~1e-3; mirrors the hardcoded "
+            "100.0 scale of the dipole losses)"
+        ),
+        type=float,
+        default=100.0,
     )
     parser.add_argument(
         "--swa_polarizability_weight",
@@ -1292,6 +1322,12 @@ def build_preprocess_arg_parser() -> argparse.ArgumentParser:
         help="Key of reference dipoles in training xyz",
         type=str,
         default=DefaultKeys.DIPOLE.value,
+    )
+    parser.add_argument(
+        "--polarization_key",
+        help="Key of reference total polarization (e/Angstrom^2, per configuration) in training xyz",
+        type=str,
+        default=DefaultKeys.POLARIZATION.value,
     )
     parser.add_argument(
         "--polarizability_key",

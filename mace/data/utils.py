@@ -55,6 +55,7 @@ def update_keyspec_from_kwargs(
         "stress_key",
         "virials_key",
         "dipole_key",
+        "polarization_key",
         "head_key",
         "elec_temp_key",
         "total_charge_key",
@@ -291,12 +292,18 @@ def load_from_xyz(
     final_energy_key = key_specification.info_keys["energy"]
     final_forces_key = key_specification.arrays_keys["forces"]
     final_dipole_key = key_specification.info_keys.get("dipole", "REF_dipole")
+    final_polarization_key = key_specification.info_keys.get(
+        "polarization", "REF_polarization"
+    )
     has_energy = any(final_energy_key in atoms.info for atoms in atoms_list)
     has_forces = any(final_forces_key in atoms.arrays for atoms in atoms_list)
     has_dipole = any(final_dipole_key in atoms.info for atoms in atoms_list)
+    has_polarization = any(
+        final_polarization_key in atoms.info for atoms in atoms_list
+    )
 
-    if not has_energy and not has_forces and not has_dipole:
-        msg = f"None of '{final_energy_key}', '{final_forces_key}', and '{final_dipole_key}' found in '{file_path}'."
+    if not has_energy and not has_forces and not has_dipole and not has_polarization:
+        msg = f"None of '{final_energy_key}', '{final_forces_key}', '{final_dipole_key}', and '{final_polarization_key}' found in '{file_path}'."
         if no_data_ok:
             logging.warning(msg + " Continuing because no_data_ok=True was passed in.")
         else:
@@ -586,6 +593,7 @@ def save_AtomicData_to_HDF5(data, i, h5_file) -> None:
     grp["stress"] = data.stress
     grp["virials"] = data.virials
     grp["dipole"] = data.dipole
+    grp["polarization"] = data.polarization
     grp["charges"] = data.charges
     grp["polarizability"] = data.polarizability
     grp["head"] = data.head

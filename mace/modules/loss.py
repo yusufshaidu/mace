@@ -156,6 +156,28 @@ def weighted_mean_squared_error_dipole(
 
 
 # ------------------------------------------------------------------------------
+# Polarization Loss Function
+# ------------------------------------------------------------------------------
+
+
+def weighted_mean_squared_error_polarization(
+    ref: Batch, pred: TensorDict, ddp: Optional[bool] = None
+) -> torch.Tensor:
+    # polarization: [n_graphs, 3], in e/Angstrom^2 -- already intensive
+    # (dipole / cell volume), unlike "dipole" above, so no /num_atoms here.
+    configs_weight = ref.weight.view(-1, 1)
+    configs_polarization_weight = ref.polarization_weight.view(-1, 3)
+    raw_loss = (
+        configs_weight
+        * configs_polarization_weight
+        * torch.square(
+            ref["polarization"].view(-1, 3) - pred["polarization"].view(-1, 3)
+        )
+    )
+    return reduce_loss(raw_loss, ddp)
+
+
+# ------------------------------------------------------------------------------
 # Polarizability Loss Function
 # ------------------------------------------------------------------------------
 
@@ -526,6 +548,42 @@ class DipoleSingleLoss(torch.nn.Module):
         return f"{self.__class__.__name__}(dipole_weight={self.dipole_weight:.3f})"
 
 
+DEFAULT_POLARIZATION_LOSS_SCALE = 100.0  # mirrors the dipole losses' hardcoded 100.0
+
+
+class PolarizationSingleLoss(torch.nn.Module):
+    def __init__(
+        self,
+        polarization_weight=1.0,
+        polarization_loss_scale=DEFAULT_POLARIZATION_LOSS_SCALE,
+    ) -> None:
+        super().__init__()
+        self.register_buffer(
+            "polarization_weight",
+            torch.tensor(polarization_weight, dtype=torch.get_default_dtype()),
+        )
+        self.register_buffer(
+            "polarization_loss_scale",
+            torch.tensor(polarization_loss_scale, dtype=torch.get_default_dtype()),
+        )
+
+    def forward(
+        self, ref: Batch, pred: TensorDict, ddp: Optional[bool] = None
+    ) -> torch.Tensor:
+        loss = (
+            weighted_mean_squared_error_polarization(ref, pred, ddp)
+            * self.polarization_loss_scale
+        )
+        return self.polarization_weight * loss
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}("
+            f"polarization_weight={self.polarization_weight:.3f}, "
+            f"polarization_loss_scale={self.polarization_loss_scale:.3f})"
+        )
+
+
 class DipolePolarLoss(torch.nn.Module):
     def __init__(
         self, dipole_weight=1.0, polarizability_weight=1.0
@@ -596,6 +654,56 @@ class WeightedEnergyForcesDipoleLoss(torch.nn.Module):
         return (
             f"{self.__class__.__name__}(energy_weight={self.energy_weight:.3f}, "
             f"forces_weight={self.forces_weight:.3f}, dipole_weight={self.dipole_weight:.3f})"
+        )
+
+
+class WeightedEnergyForcesPolarizationLoss(torch.nn.Module):
+    def __init__(
+        self,
+        energy_weight=1.0,
+        forces_weight=1.0,
+        polarization_weight=1.0,
+        polarization_loss_scale=DEFAULT_POLARIZATION_LOSS_SCALE,
+    ) -> None:
+        super().__init__()
+        self.register_buffer(
+            "energy_weight",
+            torch.tensor(energy_weight, dtype=torch.get_default_dtype()),
+        )
+        self.register_buffer(
+            "forces_weight",
+            torch.tensor(forces_weight, dtype=torch.get_default_dtype()),
+        )
+        self.register_buffer(
+            "polarization_weight",
+            torch.tensor(polarization_weight, dtype=torch.get_default_dtype()),
+        )
+        self.register_buffer(
+            "polarization_loss_scale",
+            torch.tensor(polarization_loss_scale, dtype=torch.get_default_dtype()),
+        )
+
+    def forward(
+        self, ref: Batch, pred: TensorDict, ddp: Optional[bool] = None
+    ) -> torch.Tensor:
+        loss_energy = weighted_mean_squared_error_energy(ref, pred, ddp)
+        loss_forces = mean_squared_error_forces(ref, pred, ddp)
+        loss_polarization = (
+            weighted_mean_squared_error_polarization(ref, pred, ddp)
+            * self.polarization_loss_scale
+        )
+        return (
+            self.energy_weight * loss_energy
+            + self.forces_weight * loss_forces
+            + self.polarization_weight * loss_polarization
+        )
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(energy_weight={self.energy_weight:.3f}, "
+            f"forces_weight={self.forces_weight:.3f}, "
+            f"polarization_weight={self.polarization_weight:.3f}, "
+            f"polarization_loss_scale={self.polarization_loss_scale:.3f})"
         )
 
 
