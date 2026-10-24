@@ -81,11 +81,12 @@ CHARGE_PRIOR_KEYS = (
     "charge_prior_weight",
     "charge_prior_weight_final",
     "charge_prior_scale",
-    "charge_prior_nonmain_penalty",
     "charge_prior_temperature",
     "charge_prior_temperature_final",
     "charge_prior_decay_epochs",
     "charge_prior_candidates",
+    "charge_prior_anions",
+    "charge_prior_cache",
 )
 
 
@@ -895,11 +896,12 @@ def run(args) -> None:
                 weight=charge_prior["charge_prior_weight"],
                 weight_final=charge_prior["charge_prior_weight_final"],
                 scale=charge_prior["charge_prior_scale"],
-                nonmain_penalty=charge_prior["charge_prior_nonmain_penalty"],
                 temperature=charge_prior["charge_prior_temperature"],
                 temperature_final=charge_prior["charge_prior_temperature_final"],
                 decay_epochs=charge_prior["charge_prior_decay_epochs"],
                 max_candidates=charge_prior["charge_prior_candidates"],
+                anions=charge_prior["charge_prior_anions"],
+                cache=charge_prior["charge_prior_cache"],
             ).to(device)
 
         loss_fn = _with_charge_prior(loss_fn)

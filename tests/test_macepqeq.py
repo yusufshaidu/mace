@@ -385,6 +385,31 @@ def test_macepqeq_optimizer_covers_all_parameters(pqeq, pqeq_arguments):
         assert not torch.equal(before[name], params[name].detach()), name
 
 
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+@pytest.mark.parametrize("factors, expected", [("{}", 1e-2), ('{"pqeq_gaussian_width_lr_factor": 20.0}', 0.2)])
+def test_macepqeq_gaussian_width_lr_factor(factors, expected):
+    from argparse import Namespace
+
+    from mace.tools.scripts_utils import get_optimizer, get_params_options
+
+    with default_dtype(torch.float64):
+        torch.manual_seed(0)
+        model = MACEPQEQ(pqeq=True, pqeq_arguments={}, **MODEL_CONFIG)
+    args = Namespace(
+        lr_params_factors=factors,
+        freeze=None,
+        lr=1e-2,
+        weight_decay=0.0,
+        amsgrad=True,
+        beta=0.9,
+        optimizer="adam",
+    )
+    optimizer = get_optimizer(args, get_params_options(args, model))
+    lrs = {group["name"]: group["lr"] for group in optimizer.param_groups}
+    assert lrs["pqeq_gaussian_width"] == pytest.approx(expected)
+    assert all(lr == pytest.approx(1e-2) for name, lr in lrs.items() if name != "pqeq_gaussian_width")
+
+
 FINETUNE_CONFIG = {
     **MODEL_CONFIG,
     "num_interactions": 2,
@@ -691,6 +716,33 @@ def test_uniform_gaussian_width_reference_starts_every_species_equal(fitting_con
 
 
 @pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_bounded_shell_stiffness_reaches_model(fitting_configs):
+    from bacenet.models.compute_torch import onsite_coulomb_spring
+
+    with default_dtype(torch.float64):
+        model = MACEPQEQ(
+            pqeq=True,
+            pqeq_arguments={"shell_stiffness_mode": "bounded", "shell_response_min": 0.8, "shell_response_start": 0.9},
+            **MODEL_CONFIG,
+        )
+        assert model.pqeq_config["shell_stiffness_mode"] == "bounded"
+        with torch.no_grad():
+            for p in model.pqeq_e2d_readouts.parameters():
+                p.zero_()
+        batch = _head_batch(model, fitting_configs, ["Default"], ["Default"])
+        out = model(batch, training=True)
+        nat = batch["node_attrs"].shape[0]
+        znums = model.atomic_numbers[batch["node_attrs"].argmax(dim=1)].tolist()
+        Zin = torch.as_tensor(model.pqeq_model.estimate_species_nelectrons(znums, 1), dtype=torch.float64).reshape(nat, 1)
+        kc = onsite_coulomb_spring(out["gaussian_width"].reshape(nat, -1), Zin)
+        K = out["E_d2"].reshape(nat, -1)[:, :1]
+        torch.testing.assert_close(K, kc * (1 / 0.9 - 1))
+        _randomize(model, scale=1.0)
+        K = model(batch, training=True)["E_d2"].reshape(nat, -1)[:, :1]
+        assert (K >= 0).all() and (K <= kc * 0.25 + 1e-9).all()
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
 def test_charge_prior_loss_adds_weighted_prior(fitting_configs):
     from bacenet.models.charge_prior import charge_prior_loss
     from mace.modules import WeightedEnergyForcesLoss
@@ -725,7 +777,6 @@ def test_charge_prior_loss_adds_weighted_prior(fitting_configs):
             batch["total_charge"].reshape(-1),
             scale=0.6,
             temperature=0.1,
-            nonmain_penalty=4.0,
         )
         total = loss_fn(ref=batch, pred=pred)
         torch.testing.assert_close(total, base(ref=batch, pred=pred) + 2.0 * expected_prior)
@@ -735,6 +786,34 @@ def test_charge_prior_loss_adds_weighted_prior(fitting_configs):
         weight, temperature = loss_fn.current_weight_and_temperature()
         assert weight == pytest.approx(0.2)
         assert temperature == pytest.approx(0.01)
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_charge_prior_loss_anions():
+    from mace.modules import WeightedEnergyForcesLoss
+    from mace.modules.extensions import ChargePriorLoss
+
+    base = WeightedEnergyForcesLoss(energy_weight=1.0, forces_weight=1.0)
+    default = ChargePriorLoss(base, [8, 13, 28], weight=1.0)
+    assert default.anions == "N,O,F,P,S,Cl,Se,Br,Te,I" and "anions=" in repr(default)
+    assert ChargePriorLoss(base, [8], weight=1.0, anions=["O", "F"]).anions == ("O", "F")
+    with pytest.raises(ValueError, match="Unknown anion element"):
+        ChargePriorLoss(base, [8], weight=1.0, anions="O,Xx")
+    assert build_default_arg_parser().get_default("charge_prior_anions") == default.anions
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_charge_prior_loss_loads_cache(tmp_path):
+    import bacenet.models.charge_prior as cp
+    from mace.modules import WeightedEnergyForcesLoss
+    from mace.modules.extensions import ChargePriorLoss
+
+    path = tmp_path / "cache.pkl"
+    cp.build_candidate_cache([([8, 8, 22], 0.0), ([28, 13], 0.0)], path)
+    loss = ChargePriorLoss(WeightedEnergyForcesLoss(1.0, 1.0), [8, 13, 22, 28], weight=1.0, cache=str(path))
+    assert loss.cached_compositions == 1 and "1 compositions" in repr(loss)
+    assert ChargePriorLoss(WeightedEnergyForcesLoss(1.0, 1.0), [8], weight=1.0).cached_compositions == 0
+    assert build_default_arg_parser().get_default("charge_prior_cache") is None
 
 
 @pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")

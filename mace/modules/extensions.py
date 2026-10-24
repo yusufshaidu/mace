@@ -1469,12 +1469,15 @@ class ChargePriorLoss(torch.nn.Module):
         weight: float,
         weight_final: Optional[float] = None,
         scale: float = 0.6,
-        nonmain_penalty: float = 4.0,
         temperature: float = 0.1,
         temperature_final: float = 0.01,
         decay_epochs: int = 100,
         max_candidates: int = 20,
+        anions="N,O,F,P,S,Cl,Se,Br,Te,I",
+        cache: Optional[str] = None,
     ):
+        from bacenet.models.charge_prior import anion_numbers, load_candidate_cache
+
         super().__init__()
         self.base_loss = base_loss
         self.register_buffer(
@@ -1483,11 +1486,14 @@ class ChargePriorLoss(torch.nn.Module):
         self.weight = float(weight)
         self.weight_final = 0.1 * self.weight if weight_final is None else float(weight_final)
         self.scale = float(scale)
-        self.nonmain_penalty = float(nonmain_penalty)
         self.temperature = float(temperature)
         self.temperature_final = float(temperature_final)
         self.decay_epochs = int(decay_epochs)
         self.max_candidates = int(max_candidates)
+        self.anions = anions if isinstance(anions, str) else tuple(anions)
+        anion_numbers(self.anions)
+        self.cache = cache
+        self.cached_compositions = load_candidate_cache(cache) if cache else 0
         self.epoch = 0
 
     def set_epoch(self, epoch: int) -> None:
@@ -1515,8 +1521,8 @@ class ChargePriorLoss(torch.nn.Module):
             ref["total_charge"].reshape(-1),
             scale=self.scale,
             temperature=temperature,
-            nonmain_penalty=self.nonmain_penalty,
             max_candidates=self.max_candidates,
+            anions=self.anions,
         )
 
     def forward(self, ref, pred, ddp: Optional[bool] = None) -> torch.Tensor:
@@ -1530,7 +1536,8 @@ class ChargePriorLoss(torch.nn.Module):
         return (
             f"{self.__class__.__name__}(base={self.base_loss!r}, weight={self.weight}, "
             f"weight_final={self.weight_final}, scale={self.scale}, "
-            f"nonmain_penalty={self.nonmain_penalty}, temperature={self.temperature}, "
+            f"temperature={self.temperature}, "
             f"temperature_final={self.temperature_final}, decay_epochs={self.decay_epochs}, "
-            f"max_candidates={self.max_candidates})"
+            f"max_candidates={self.max_candidates}, anions={self.anions}, "
+            f"cache={self.cache} ({self.cached_compositions} compositions))"
         )

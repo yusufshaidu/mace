@@ -921,11 +921,14 @@ def get_params_options(
         and model.pqeq_model is not None
         and hasattr(model.pqeq_model, "gaussian_width_embedding")
     ):
+        width_lr = lr_params_factors.get("pqeq_gaussian_width_lr_factor", 1.0) * args.lr
+        logging.info(f"Gaussian width learning rate: {width_lr:g}")
         param_options["params"].append(
             {
                 "name": "pqeq_gaussian_width",
                 "params": model.pqeq_model.gaussian_width_embedding.parameters(),
                 "weight_decay": 0.0,
+                "lr": width_lr,
             }
         )
     pqeq_readout_params = [

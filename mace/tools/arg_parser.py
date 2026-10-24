@@ -1148,12 +1148,6 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=0.6,
     )
     parser.add_argument(
-        "--charge_prior_nonmain_penalty",
-        help="Log-probability penalty kappa for each atom in a non-main oxidation state",
-        type=float,
-        default=4.0,
-    )
-    parser.add_argument(
         "--charge_prior_temperature",
         help="Starting temperature tau of the soft minimum over candidates, in e^2",
         type=float,
@@ -1176,6 +1170,19 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         help="Charge-neutral oxidation-state assignments kept per composition",
         type=int,
         default=20,
+    )
+    parser.add_argument(
+        "--charge_prior_anions",
+        help="Comma-separated anion elements; only structures containing one get the prior, the others "
+        "are left to QEq",
+        type=str,
+        default="N,O,F,P,S,Cl,Se,Br,Te,I",
+    )
+    parser.add_argument(
+        "--charge_prior_cache",
+        help="Candidate cache from python -m bacenet.cli.charge_prior_cache, loaded on every rank at startup",
+        type=str,
+        default=None,
     )
     parser.add_argument(
         "--pqeq_head_init",
