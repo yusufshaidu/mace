@@ -114,6 +114,39 @@ def resolve_charge_prior_settings(args, model):
     return settings
 
 
+SHELL_STABILITY_DEFAULTS = {
+    "shell_spring_offset": 0.0,
+    "shell_spring_offset_epochs": 10,
+    "shell_stability_margin": None,
+    "shell_stability_weight": 0.0,
+}
+
+
+def resolve_shell_stability_settings(model):
+    """Shell spring offset schedule and shell stability penalty from --pqeq_arguments, or None when both are off.
+
+    Returns the ShellStabilityLoss keyword arguments (weight, margin, offset, offset_epochs).
+    """
+    pqeq_config = getattr(model, "pqeq_config", None) or {}
+    settings = {
+        key: default if pqeq_config.get(key) is None else pqeq_config[key]
+        for key, default in SHELL_STABILITY_DEFAULTS.items()
+    }
+    offset = float(settings["shell_spring_offset"])
+    weight = float(settings["shell_stability_weight"])
+    margin = settings["shell_stability_margin"]
+    if offset == 0.0 and margin is None and weight == 0.0:
+        return None
+    if not getattr(model, "pqeq", False):
+        raise ValueError("shell_spring_offset and shell_stability_* need a MACEPQEQ model with pqeq: true")
+    return {
+        "weight": weight,
+        "margin": None if margin is None else float(margin),
+        "offset": offset,
+        "offset_epochs": int(settings["shell_spring_offset_epochs"]),
+    }
+
+
 def main() -> None:
     """
     This script runs the training/fine tuning for mace
@@ -890,13 +923,27 @@ def run(args) -> None:
         swa, swas = get_swa(args, model, optimizer, swas, dipole_only)
 
     charge_prior = resolve_charge_prior_settings(args, model)
+    if hasattr(model, "pqeq_model"):
+        from bacenet.models.charge_prior import load_candidate_cache, resolve_charge_reference
+
+        pqeq_configs = model.pqeq_model.configs
+        charge_reference = resolve_charge_reference(
+            pqeq_configs.get("charge_reference"),
+            pqeq_configs.get("oxidation_states"),
+            charge_prior["charge_prior_weight"],
+        )
+        if charge_reference == "icsd":
+            pqeq_configs["charge_prior_anions"] = charge_prior["charge_prior_anions"]
+            pqeq_configs["charge_prior_candidates"] = charge_prior["charge_prior_candidates"]
+            if charge_prior["charge_prior_cache"]:
+                load_candidate_cache(charge_prior["charge_prior_cache"])
+        logging.info(f"Charge reference q0: {charge_reference}")
     if charge_prior["charge_prior_weight"] > 0.0:
         if not hasattr(model, "pqeq_model"):
             raise ValueError("The charge prior needs a model that predicts charges (MACEPQEQ)")
-        from bacenet.models.charge_prior import check_prior_solver, check_reference_charges
+        from bacenet.models.charge_prior import check_prior_solver
         from mace.modules.extensions import ChargePriorLoss
 
-        check_reference_charges(model.pqeq_model.estimate_species_q0(list(z_table.zs)))
         check_prior_solver(model.pqeq_model.model.exact_solver, model.pqeq_model.model.pbc)
 
         def _with_charge_prior(base):
@@ -918,6 +965,21 @@ def run(args) -> None:
         if swa is not None:
             swa.loss_fn = _with_charge_prior(swa.loss_fn)
         logging.info(f"Charge prior enabled: {loss_fn}")
+    shell_stability = resolve_shell_stability_settings(model)
+    if shell_stability is not None:
+        from mace.modules.extensions import ShellStabilityLoss
+
+        set_offsets = [model.pqeq_model.set_shell_spring_offset]
+        if swa is not None:
+            set_offsets.append(swa.model.module.pqeq_model.set_shell_spring_offset)
+
+        def _with_shell_stability(base):
+            return ShellStabilityLoss(base, set_offsets, **shell_stability).to(device)
+
+        loss_fn = _with_shell_stability(loss_fn)
+        if swa is not None:
+            swa.loss_fn = _with_shell_stability(swa.loss_fn)
+        logging.info(f"Shell stability enabled: {loss_fn}")
 
     checkpoint_handler = tools.CheckpointHandler(
         directory=args.checkpoints_dir,

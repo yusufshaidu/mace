@@ -1060,3 +1060,103 @@ def test_shell_vector_term_is_equivariant_and_conservative(fitting_configs, anal
             fd = -(model(_single_batch(model, plus))["energy"]
                    - model(_single_batch(model, minus))["energy"]).item() / (2 * h)
             assert a["forces"][atom, axis].item() == pytest.approx(fd, rel=1e-5, abs=1e-7)
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_shell_stability_loss_adds_penalty_and_schedules_offset(fitting_configs):
+    from mace.modules import WeightedEnergyForcesLoss
+    from mace.modules.extensions import ShellStabilityLoss
+
+    with default_dtype(torch.float64):
+        model = MACEPQEQ(pqeq=True, pqeq_arguments={"shell_stability_margin": 1.0e4}, **MODEL_CONFIG)
+        _randomize(model)
+        z_table = utils.AtomicNumberTable([int(z) for z in model.atomic_numbers])
+        periodic = [c for c in fitting_configs if c.pbc.any()][:3]
+        loader = torch_geometric.dataloader.DataLoader(
+            dataset=[
+                data.AtomicData.from_config(
+                    data.config_from_atoms(
+                        atoms, key_specification=data.KeySpecification(
+                            info_keys={"energy": "REF_energy"}, arrays_keys={"forces": "REF_forces"}
+                        )
+                    ),
+                    z_table=z_table,
+                    cutoff=float(model.r_max),
+                )
+                for atoms in periodic
+            ],
+            batch_size=3,
+            shuffle=False,
+        )
+        batch = next(iter(loader))
+        pred = model(batch.to_dict(), training=True)
+        curvature = pred["shell_curvature"]
+        assert curvature.shape == (3,) and (curvature < 1.0e4).all()
+
+        class Base(WeightedEnergyForcesLoss):
+            epochs = []
+
+            def set_epoch(self, epoch):
+                self.epochs.append(epoch)
+
+        base = Base(energy_weight=1.0, forces_weight=1.0)
+        loss_fn = ShellStabilityLoss(
+            base, [model.pqeq_model.set_shell_spring_offset], weight=2.0, margin=1.0e4, offset=5.0, offset_epochs=10
+        )
+        total = loss_fn(ref=batch, pred=pred)
+        expected = base(ref=batch, pred=pred) + 2.0 * torch.relu(1.0e4 - curvature).pow(2).mean()
+        torch.testing.assert_close(total, expected)
+        assert loss_fn.n_below == 3 and loss_fn.n_structures == 3
+
+        (total - base(ref=batch, pred=pred)).backward()
+        grads = [p.grad for p in model.pqeq_e2d_readouts.parameters() if p.grad is not None]
+        assert grads and any(g.abs().sum() > 0 for g in grads)
+
+        for epoch, offset in ((0, 5.0), (5, 2.5), (10, 0.0), (12, 0.0)):
+            loss_fn.set_epoch(epoch)
+            assert model.pqeq_model.configs["shell_spring_offset"] == pytest.approx(offset)
+        assert Base.epochs == [0, 5, 10, 12] and loss_fn.n_structures == 0
+
+        loss_fn.set_epoch(0)
+        shifted = model(batch.to_dict(), training=True)
+        torch.testing.assert_close(shifted["shell_curvature"], curvature)
+        torch.testing.assert_close(shifted["E_d2"], pred["E_d2"] + 5.0)
+
+    with pytest.raises(ValueError, match="needs shell_stability_margin"):
+        ShellStabilityLoss(base, [], weight=1.0)
+
+
+def test_resolve_shell_stability_settings():
+    from argparse import Namespace
+
+    from mace.cli.run_train import resolve_shell_stability_settings
+
+    assert resolve_shell_stability_settings(Namespace(pqeq=True, pqeq_config={})) is None
+    settings = resolve_shell_stability_settings(
+        Namespace(pqeq=True, pqeq_config={"shell_spring_offset": 5, "shell_stability_margin": 1, "shell_stability_weight": 0.1})
+    )
+    assert settings == {"weight": 0.1, "margin": 1.0, "offset": 5.0, "offset_epochs": 10}
+    with pytest.raises(ValueError, match="pqeq: true"):
+        resolve_shell_stability_settings(Namespace(pqeq=False, pqeq_config={"shell_spring_offset": 1.0}))
+
+
+@pytest.mark.skipif(not BACENET_AVAILABLE, reason="bacenet library is not available")
+def test_run_train_with_shell_stability(tmp_path, fitting_configs):
+    ase.io.write(tmp_path / "fit.xyz", fitting_configs)
+    params = _mace_params.copy()
+    params.update(
+        checkpoints_dir=str(tmp_path),
+        model_dir=str(tmp_path),
+        train_file=tmp_path / "fit.xyz",
+        max_num_epochs=2,
+        pqeq=None,
+        pqeq_arguments="{'shell_spring_offset': 4.0, 'shell_spring_offset_epochs': 1, "
+        "'shell_stability_margin': 1.0, 'shell_stability_weight': 0.1}",
+    )
+    args = build_default_arg_parser().parse_args(
+        [f"--{k}={v}" if v is not None else f"--{k}" for k, v in params.items()]
+    )
+    mace_run(args)
+    model = torch.load(tmp_path / "MACE.model", map_location="cpu", weights_only=False)
+    assert model.pqeq_model.configs["shell_spring_offset"] == 0.0
+    assert model.pqeq_model.configs["shell_stability_margin"] == 1.0

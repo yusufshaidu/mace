@@ -24,6 +24,7 @@ from mace.modules.blocks import (
     NonLinearBiasReadoutBlock,
     NonLinearReadoutBlock,
 )
+from mace.modules.loss import reduce_loss
 from mace.modules.models import ScaleShiftMACE
 from mace.modules.utils import get_atomic_virials_stresses, get_outputs, prepare_graph
 from mace.modules.wrapper_ops import (
@@ -540,6 +541,7 @@ class MACEPQEQ(ScaleShiftMACE):
             "E_d2": pqeq_result['E_d2'],
             "E_d1": e_d1_pqeq,
             "gaussian_width": pqeq_result['gaussian_width'],
+            "shell_curvature": pqeq_result['shell_curvature'],
         }
 
 @compile_mode("script")
@@ -1540,4 +1542,82 @@ class ChargePriorLoss(torch.nn.Module):
             f"temperature_final={self.temperature_final}, decay_epochs={self.decay_epochs}, "
             f"max_candidates={self.max_candidates}, anions={self.anions}, "
             f"cache={self.cache} ({self.cached_compositions} compositions))"
+        )
+
+
+class ShellStabilityLoss(torch.nn.Module):
+    """Adds the pQEq shell stability penalty to a MACE loss and runs the decaying shell spring offset.
+
+    The penalty is weight * mean over structures of relu(margin - lambda)^2, with lambda the lowest curvature of the
+    shell Schur complement without the offset (pred["shell_curvature"], capped at margin). set_epoch sets the
+    constant spring offset * max(0, 1 - epoch / offset_epochs) on every model in set_offsets, forwards the epoch
+    to the base loss, and logs how many structures fell below the margin since the previous call.
+    """
+
+    def __init__(
+        self,
+        base_loss: torch.nn.Module,
+        set_offsets,
+        weight: float = 0.0,
+        margin: Optional[float] = None,
+        offset: float = 0.0,
+        offset_epochs: int = 10,
+    ):
+        super().__init__()
+        if weight > 0.0 and margin is None:
+            raise ValueError("shell_stability_weight > 0 needs shell_stability_margin")
+        if int(offset_epochs) < 1:
+            raise ValueError(f"shell_spring_offset_epochs must be >= 1, got {offset_epochs}")
+        self.base_loss = base_loss
+        self._set_offsets = list(set_offsets)
+        self.weight = float(weight)
+        self.margin = None if margin is None else float(margin)
+        self.offset = float(offset)
+        self.offset_epochs = int(offset_epochs)
+        self.epoch = 0
+        self._reset_counts()
+
+    def _reset_counts(self) -> None:
+        self.n_structures = 0
+        self.n_below = 0
+        self.lowest = float("inf")
+
+    def current_offset(self) -> float:
+        return self.offset * max(0.0, 1.0 - self.epoch / self.offset_epochs)
+
+    def set_epoch(self, epoch: int) -> None:
+        if hasattr(self.base_loss, "set_epoch"):
+            self.base_loss.set_epoch(epoch)
+        if self.margin is not None and self.n_structures:
+            logging.info(
+                f"Shell stability (train and valid, this rank): {self.n_below}/{self.n_structures} structures "
+                f"below {self.margin:g} eV/A^2, lowest curvature {self.lowest:.4g} eV/A^2"
+            )
+        self._reset_counts()
+        self.epoch = int(epoch)
+        offset = self.current_offset()
+        for set_offset in self._set_offsets:
+            set_offset(offset)
+        logging.info(f"Shell spring offset at epoch {self.epoch}: {offset:g} eV/A^2")
+
+    def forward(self, ref, pred, ddp: Optional[bool] = None) -> torch.Tensor:
+        loss = self.base_loss(ref=ref, pred=pred, ddp=ddp)
+        curvature = pred.get("shell_curvature")
+        if curvature is None or self.margin is None:
+            return loss
+        with torch.no_grad():
+            finite = torch.isfinite(curvature)
+            self.n_structures += int(finite.sum())
+            self.n_below += int((curvature[finite] < self.margin).sum())
+            if finite.any():
+                self.lowest = min(self.lowest, float(curvature[finite].min()))
+        if self.weight == 0.0:
+            return loss
+        penalty = torch.relu(self.margin - curvature).pow(2)
+        return loss + self.weight * reduce_loss(penalty, ddp)
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}(base={self.base_loss!r}, weight={self.weight}, margin={self.margin}, "
+            f"offset={self.offset}, offset_epochs={self.offset_epochs})"
         )

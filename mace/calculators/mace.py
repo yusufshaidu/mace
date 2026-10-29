@@ -481,8 +481,6 @@ class MACECalculator(Calculator):
                 compute_edge_forces=self.compute_atomic_stresses,
                 compute_atomic_stresses=self.compute_atomic_stresses,
             )
-            print(f"out keys: {list(out.keys())}")
-            print(out["stress"])
             if i == 0:
                 ret_tensors, node_e0 = self._create_result_tensors(
                     self.num_models, len(atoms), batch, out
