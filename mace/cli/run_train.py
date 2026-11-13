@@ -931,6 +931,8 @@ def run(args) -> None:
             pqeq_configs.get("charge_reference"),
             pqeq_configs.get("oxidation_states"),
             charge_prior["charge_prior_weight"],
+            pqeq_configs.get("charge_reference_scale", 1.0),
+            charge_prior["charge_prior_scale"],
         )
         if charge_reference == "icsd":
             pqeq_configs["charge_prior_anions"] = charge_prior["charge_prior_anions"]
@@ -1009,6 +1011,9 @@ def run(args) -> None:
                 restart_lbfgs = True
         if opt_start_epoch is not None:
             start_epoch = opt_start_epoch
+        if swa is not None:
+            for group in optimizer.param_groups:
+                group.setdefault("swa_lr", args.swa_lr)
 
     ema: Optional[ExponentialMovingAverage] = None
     if args.ema:
@@ -1038,9 +1043,10 @@ def run(args) -> None:
 
 
     train_valid_data_loader = {}
-    for head_config in head_configs:
-        data_loader_name = "train_" + head_config.head_name
-        train_valid_data_loader[data_loader_name] = head_config.train_loader
+    if args.evaluate_train_set:
+        for head_config in head_configs:
+            data_loader_name = "train_" + head_config.head_name
+            train_valid_data_loader[data_loader_name] = head_config.train_loader
     for head, valid_loader in valid_loaders.items():
         data_load_name = "valid_" + head
         train_valid_data_loader[data_load_name] = valid_loader
@@ -1110,9 +1116,10 @@ def run(args) -> None:
     logging.info("===========RESULTS===========")
 
     train_valid_data_loader = {}
-    for head_config in head_configs:
-        data_loader_name = "train_" + head_config.head_name
-        train_valid_data_loader[data_loader_name] = head_config.train_loader
+    if args.evaluate_train_set:
+        for head_config in head_configs:
+            data_loader_name = "train_" + head_config.head_name
+            train_valid_data_loader[data_loader_name] = head_config.train_loader
     for head, valid_loader in valid_loaders.items():
         data_load_name = "valid_" + head
         train_valid_data_loader[data_load_name] = valid_loader
@@ -1147,9 +1154,9 @@ def run(args) -> None:
                         test_file, r_max=args.r_max, z_table=z_table, heads=heads, head=head_config.head_name
                     )
             else:
-                test_folders = glob(head_config.test_dir + "/*")
+                test_folders = glob.glob(head_config.test_dir + "/*")
                 for folder in test_folders:
-                    name = os.path.splitext(os.path.basename(test_file))[0]
+                    name = os.path.basename(os.path.normpath(folder))
                     test_sets[name] = data.dataset_from_sharded_hdf5(
                         folder, r_max=args.r_max, z_table=z_table, heads=heads, head=head_config.head_name
                     )
@@ -1171,6 +1178,7 @@ def run(args) -> None:
             test_loader = torch_geometric.dataloader.DataLoader(
                 test_set,
                 batch_size=args.valid_batch_size,
+                sampler=test_sampler,
                 shuffle=(test_sampler is None),
                 drop_last=drop_last,
                 num_workers=args.num_workers,

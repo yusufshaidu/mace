@@ -176,6 +176,17 @@ class MACEPQEQ(ScaleShiftMACE):
                 f"PQEQ species_nelectrons set explicitly: {bacenet_configs['species_nelectrons']}"
             )
 
+        self.q0_species_embedding = bool(bacenet_configs.get('q0_species_embedding', False))
+        if self.q0_species_embedding:
+            from bacenet.models.charge_prior import resolve_charge_reference
+            reference = resolve_charge_reference(bacenet_configs.get('charge_reference'),
+                                                 bacenet_configs.get('oxidation_states'))
+            if reference not in ('species', 'icsd'):
+                raise ValueError("q0_species_embedding needs charge_reference 'species' or 'icsd', "
+                                 f"got {reference!r}")
+            num_channels = o3.Irreps(kwargs["hidden_irreps"]).count(o3.Irrep(0, 1))
+            self.q0_embedding = torch.nn.Parameter(torch.zeros(num_channels))
+
         self.pqeq_e1_readouts = torch.nn.ModuleList()
         self.pqeq_e2_readouts = torch.nn.ModuleList()
         # E_d2 (shell spring constant) is only consumed by pQEq; with plain QEq
@@ -208,6 +219,12 @@ class MACEPQEQ(ScaleShiftMACE):
                 )
         if self.environment_dependent_gaussian_width:
             self.zero_pqeq_readouts(["pqeq_sigma_readouts"])
+
+        if (bacenet_configs.get('charge_cusp_mode') or 'none') == 'learned':
+            self.pqeq_kappa_readouts = torch.nn.ModuleList(
+                [_copy_mace_readout(readout, cueq_config=cueq_config) for readout in self.readouts]  # type: ignore
+            )
+            self.zero_pqeq_readouts(["pqeq_kappa_readouts"])
 
         self.shell_vector_term = bool(bacenet_configs.get('shell_vector_term', False))
         self.pqeq_ed1_layers: List[int] = []
@@ -323,6 +340,14 @@ class MACEPQEQ(ScaleShiftMACE):
 
         # Embeddings
         node_feats = self.node_embedding(data["node_attrs"])
+        node_q0: Optional[torch.Tensor] = None
+        if hasattr(self, "q0_embedding"):
+            node_q0 = self.pqeq_model.node_reference_charges(
+                self.atomic_numbers[data["node_attrs"].argmax(dim=-1)],
+                data["batch"],
+                data["total_charge"],
+            ).to(device=node_feats.device, dtype=node_feats.dtype)
+            node_feats = node_feats + node_q0.unsqueeze(-1) * self.q0_embedding
         edge_attrs = self.spherical_harmonics(vectors)
         edge_feats, cutoff = self.radial_embedding(
             lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
@@ -366,6 +391,7 @@ class MACEPQEQ(ScaleShiftMACE):
         node_e2ds_list: List[torch.Tensor] = []
         node_sigmas_list: List[torch.Tensor] = []
         node_ed1s_list: List[torch.Tensor] = []
+        node_kappas_list: List[torch.Tensor] = []
 
         for i, (interaction, product) in enumerate(
             zip(self.interactions, self.products)
@@ -420,6 +446,12 @@ class MACEPQEQ(ScaleShiftMACE):
                 )[num_atoms_arange, node_heads]
                 node_sigmas_list.append(node_sigmas)
 
+            if hasattr(self, "pqeq_kappa_readouts"):
+                node_kappas = self.pqeq_kappa_readouts[i](
+                    node_feats_list[feat_idx], node_heads
+                )[num_atoms_arange, node_heads]
+                node_kappas_list.append(node_kappas)
+
         if hasattr(self, "pqeq_ed1_readouts"):
             for k, ed1_readout in enumerate(self.pqeq_ed1_readouts):
                 layer = self.pqeq_ed1_layers[k]
@@ -469,6 +501,10 @@ class MACEPQEQ(ScaleShiftMACE):
         if hasattr(self, "pqeq_ed1_readouts"):
             e_d1_pqeq = torch.sum(torch.stack(node_ed1s_list, dim=0), dim=0)
             pqeq_data["E_d1"] = e_d1_pqeq
+        if node_q0 is not None:
+            pqeq_data["q0"] = node_q0
+        if hasattr(self, "pqeq_kappa_readouts"):
+            pqeq_data["E_kappa"] = torch.sum(torch.stack(node_kappas_list, dim=1), dim=1)
 
         pqeq_result = self.pqeq_model(pqeq_data)
 

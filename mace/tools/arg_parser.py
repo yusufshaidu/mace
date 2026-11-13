@@ -754,6 +754,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default="pt_head",
     )
+    parser.add_argument(
+        "--evaluate_train_set",
+        help="Include the training set in the final error tables and plots (validation and test sets are always evaluated)",
+        type=str2bool,
+        default=False,
+    )
 
     # Loss and optimization
     parser.add_argument(

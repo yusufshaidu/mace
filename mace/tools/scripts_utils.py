@@ -978,6 +978,15 @@ def get_params_options(
                 "lr": lr_params_factors.get("pqeq_readouts_lr_factor", 1.0) * args.lr,
             }
         )
+    if getattr(model, "q0_embedding", None) is not None:
+        param_options["params"].append(
+            {
+                "name": "q0_embedding",
+                "params": [model.q0_embedding],
+                "weight_decay": 0.0,
+                "lr": lr_params_factors.get("embedding_lr_factor", 1.0) * args.lr,
+            }
+        )
     return param_options
 
 
